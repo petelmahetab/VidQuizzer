@@ -1,8 +1,6 @@
-// src/middleware/upload.middleware.js
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
-
+import multer from "multer";
+import fs from 'fs'
+import path from 'path'
 // Ensure uploads directory exists
 const uploadsDir = path.join(__dirname, '../../uploads');
 if (!fs.existsSync(uploadsDir)) {

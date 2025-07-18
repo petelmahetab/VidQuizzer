@@ -1,12 +1,13 @@
-// src/services/ai.service.js
-const { OpenAI } = require('openai');
-const axios = require('axios');
+
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import axios from 'axios';
+import dotenv from 'dotenv'
+dotenv.config()
 
 class AIService {
   constructor() {
-    this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
+    this.genAI = new GoogleGenerativeAI(process.env.GEMINI_AI_KEY);
+    this.model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
   }
 
   // Generate summary from transcript
@@ -20,26 +21,19 @@ class AIService {
         key_insights: `Extract the most important insights, lessons, and takeaways from this video transcript:\n\n${transcript}`
       };
 
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
-        messages: [
-          {
-            role: 'system',
-            content: `You are an expert content summarizer. Create summaries that are clear, concise, and capture the essence of the content. Respond in ${language} language.`
-          },
-          {
-            role: 'user',
-            content: prompts[type] || prompts.detailed
-          }
-        ],
-        max_tokens: this.getMaxTokens(type),
-        temperature: 0.3
-      });
+      const systemPrompt = `You are an expert content summarizer. Create summaries that are clear, concise, and capture the essence of the content. Respond in ${language} language.`;
+      const userPrompt = prompts[type] || prompts.detailed;
+      
+      const fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
+
+      const result = await this.model.generateContent(fullPrompt);
+      const response = await result.response;
+      const content = response.text();
 
       return {
-        content: response.choices[0].message.content,
-        wordCount: response.choices[0].message.content.split(/\s+/).length,
-        model: 'gpt-3.5-turbo'
+        content: content,
+        wordCount: content.split(/\s+/).length,
+        model: 'gemini-1.5-flash'
       };
     } catch (error) {
       console.error('Summary generation error:', error);
@@ -75,29 +69,22 @@ class AIService {
         }
       ]
       
+      You are an expert educator creating assessment questions. Generate high-quality questions that test understanding of the content.
+      
       Transcript: ${transcript}`;
 
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are an expert educator creating assessment questions. Generate high-quality questions that test understanding of the content.'
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        max_tokens: 2000,
-        temperature: 0.4
-      });
+      const result = await this.model.generateContent(prompt);
+      const response = await result.response;
+      const content = response.text();
 
-      const questions = JSON.parse(response.choices[0].message.content);
+      // Clean the response to extract JSON
+      const cleanContent = content.replace(/```json|```/g, '').trim();
+      const questions = JSON.parse(cleanContent);
+      
       return questions.map(q => ({
         ...q,
         aiGenerated: true,
-        aiModel: 'gpt-3.5-turbo',
+        aiModel: 'gemini-1.5-flash',
         confidence: Math.random() * 0.3 + 0.7 // Simulate confidence score
       }));
     } catch (error) {
@@ -120,25 +107,17 @@ class AIService {
         }
       ]
       
+      You are an expert content analyst. Extract and categorize topics from text content.
+      
       Transcript: ${transcript}`;
 
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are an expert content analyst. Extract and categorize topics from text content.'
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        max_tokens: 1000,
-        temperature: 0.2
-      });
+      const result = await this.model.generateContent(prompt);
+      const response = await result.response;
+      const content = response.text();
 
-      return JSON.parse(response.choices[0].message.content);
+      // Clean the response to extract JSON
+      const cleanContent = content.replace(/```json|```/g, '').trim();
+      return JSON.parse(cleanContent);
     } catch (error) {
       console.error('Topic extraction error:', error);
       return [];
@@ -160,25 +139,17 @@ class AIService {
         "reasoning": "Brief explanation of the sentiment analysis"
       }
       
+      You are an expert sentiment analyzer. Analyze the emotional tone and sentiment of text content.
+      
       Transcript: ${transcript}`;
 
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are an expert sentiment analyzer. Analyze the emotional tone and sentiment of text content.'
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        max_tokens: 500,
-        temperature: 0.1
-      });
+      const result = await this.model.generateContent(prompt);
+      const response = await result.response;
+      const content = response.text();
 
-      return JSON.parse(response.choices[0].message.content);
+      // Clean the response to extract JSON
+      const cleanContent = content.replace(/```json|```/g, '').trim();
+      return JSON.parse(cleanContent);
     } catch (error) {
       console.error('Sentiment analysis error:', error);
       return {
@@ -205,27 +176,19 @@ class AIService {
         }
       ]
       
+      You are an expert content curator. Identify the most important points from video content with their timestamps.
+      
       Transcript: ${transcript}
       
       Timestamped segments: ${JSON.stringify(timestampedText.slice(0, 10))}`;
 
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are an expert content curator. Identify the most important points from video content with their timestamps.'
-          },
-          {
-            role: 'user',
-            content: prompt
-          }
-        ],
-        max_tokens: 1500,
-        temperature: 0.3
-      });
+      const result = await this.model.generateContent(prompt);
+      const response = await result.response;
+      const content = response.text();
 
-      return JSON.parse(response.choices[0].message.content);
+      // Clean the response to extract JSON
+      const cleanContent = content.replace(/```json|```/g, '').trim();
+      return JSON.parse(cleanContent);
     } catch (error) {
       console.error('Key points generation error:', error);
       return [];
@@ -235,30 +198,28 @@ class AIService {
   // Chat with video content
   async chatWithVideo(transcript, question, conversationHistory = []) {
     try {
-      const messages = [
-        {
-          role: 'system',
-          content: `You are an AI assistant that can answer questions about video content. 
-          Use the following transcript to answer user questions accurately and helpfully.
-          
-          Video Transcript: ${transcript}`
-        },
-        ...conversationHistory,
-        {
-          role: 'user',
-          content: question
-        }
-      ];
+      let conversationContext = '';
+      if (conversationHistory.length > 0) {
+        conversationContext = conversationHistory.map(msg => 
+          `${msg.role}: ${msg.content}`
+        ).join('\n');
+      }
 
-      const response = await this.openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
-        messages: messages,
-        max_tokens: 1000,
-        temperature: 0.4
-      });
+      const prompt = `You are an AI assistant that can answer questions about video content. 
+      Use the following transcript to answer user questions accurately and helpfully.
+      
+      Video Transcript: ${transcript}
+      
+      ${conversationContext ? `Previous conversation:\n${conversationContext}\n` : ''}
+      
+      User question: ${question}`;
+
+      const result = await this.model.generateContent(prompt);
+      const response = await result.response;
+      const content = response.text();
 
       return {
-        answer: response.choices[0].message.content,
+        answer: content,
         timestamp: this.findRelevantTimestamp(transcript, question),
         confidence: Math.random() * 0.3 + 0.7
       };
@@ -268,7 +229,7 @@ class AIService {
     }
   }
 
-  // Helper method to get max tokens based on summary type
+  // Helper method to get max tokens based on summary type (not needed for Gemini but kept for compatibility)
   getMaxTokens(type) {
     const tokenLimits = {
       brief: 150,
