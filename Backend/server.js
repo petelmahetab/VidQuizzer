@@ -14,6 +14,8 @@ import mongoose from 'mongoose';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+import pathToRegexp from 'path-to-regexp';
+const re = pathToRegexp(path);
 // Load environment variables
 dotenv.config();
 
@@ -36,11 +38,11 @@ connectDB();
 
 // Import routes
 import videoRoutes from './routes/video.routes.js';
-import aiRoutes from './routes/ai.routes.js';
-import uploadRoutes from './routes/upload.route.js';
-import authRoutes from './routes/auth.routes.js';
-import questionRoutes from './routes/question.routes.js';
-import summaryRoutes from './routes/summary.routes.js';
+// import aiRoutes from './routes/ai.routes.js';
+// import uploadRoutes from './routes/upload.route.js';
+// import authRoutes from './routes/auth.routes.js';
+// import questionRoutes from './routes/question.routes.js';
+// import summaryRoutes from './routes/summary.routes.js';
 
 // Create Express app
 const app = express();
@@ -60,7 +62,7 @@ const limiter = rateLimit({
   max: 100, // limit each IP to 100 requests per windowMs
   message: 'Too many requests from this IP, please try again later.'
 });
-app.use('/api/', limiter);
+app.use('/api', limiter);
 
 // Body parsing middleware
 app.use(express.json({ limit: '10mb' }));
@@ -85,11 +87,11 @@ app.get('/health', (req, res) => {
 
 // API routes
 app.use('/api/videos', videoRoutes);
-app.use('/api/ai', aiRoutes);
-app.use('/api/upload', uploadRoutes);
-app.use('/api/auth', authRoutes);
-app.use('/api/questions', questionRoutes);
-app.use('/api/ai', summaryRoutes);
+// app.use('/api/ai', aiRoutes);
+// app.use('/api/upload', uploadRoutes);
+// app.use('/api/auth', authRoutes);
+// app.use('/api/questions', questionRoutes);
+// app.use('/api/ai', summaryRoutes);
 
 // 404 handler
 app.use('*', (req, res) => {
