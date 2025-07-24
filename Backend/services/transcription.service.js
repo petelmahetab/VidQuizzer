@@ -288,4 +288,4 @@ class TranscriptionService {
   }
 }
 
-module.exports = new TranscriptionService();
+export default new TranscriptionService();

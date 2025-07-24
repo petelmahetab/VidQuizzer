@@ -260,4 +260,4 @@ class AIService {
   }
 }
 
-module.exports = AIService;
+export default AIService;

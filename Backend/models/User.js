@@ -2,6 +2,7 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 
+
 const userSchema = new mongoose.Schema({
     username: {
         type: String,
@@ -98,4 +99,4 @@ userSchema.methods.canProcessVideo = function () {
     return this.usage.videosProcessed < this.usage.monthlyLimit;
 };
 
-module.exports = mongoose.model('User', userSchema);
+export default mongoose.model('User', userSchema);

@@ -1,7 +1,6 @@
 // src/middleware/auth.middleware.js
 import jwt from 'jsonwebtoken';
-import User from '../models/User'
-
+import User from '../models/User.js'
 // Verify JWT token
 const authenticateToken = async (req, res, next) => {
   try {
@@ -98,7 +97,7 @@ const optionalAuth = async (req, res, next) => {
   }
 };
 
-module.exports = {
+ export default  {
   authenticateToken,
   checkVideoLimit,
   requirePremium,

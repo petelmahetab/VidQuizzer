@@ -1,6 +1,4 @@
-
 import express from 'express';
-
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
@@ -9,31 +7,16 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import rateLimit from 'express-rate-limit';
 import mongoose from 'mongoose';
-
+import connectDB from './config/db.js';
+// 44
 // Get __dirname equivalent for ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-import pathToRegexp from 'path-to-regexp';
-const re = pathToRegexp(path);
 // Load environment variables
 dotenv.config();
 
 // Connect to MongoDB
-const connectDB = async () => {
-  try {
-    await mongoose.connect(process.env.MONGODB_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
-    console.log('🚀 MongoDB connected');
-  } catch (error) {
-    console.error('MongoDB connection error:', error);
-    process.exit(1); // Exit process if connection fails
-  }
-};
-
-// Call the connection function
 connectDB();
 
 // Import routes
@@ -85,6 +68,17 @@ app.get('/health', (req, res) => {
   });
 });
 
+app.get('/api', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: '✅ API is working. Try endpoints like /api/videos',
+    availableRoutes: [
+      '/api/videos',
+     
+    ]
+  });
+});
+
 // API routes
 app.use('/api/videos', videoRoutes);
 // app.use('/api/ai', aiRoutes);
@@ -93,13 +87,43 @@ app.use('/api/videos', videoRoutes);
 // app.use('/api/questions', questionRoutes);
 // app.use('/api/ai', summaryRoutes);
 
-// 404 handler
-app.use('*', (req, res) => {
+// FIXED: Replace problematic '*' route with specific catch-all routes
+// This is more compatible with Express 5 and path-to-regexp 8.x
+app.get('*', (req, res) => {
   res.status(404).json({
     success: false,
-    message: 'Route not found'
+    message: 'GET route not found'
   });
 });
+
+app.post('*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'P route not found'
+  });
+});
+
+app.put('*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'PUT route not found'
+  });
+});
+
+app.delete('*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'DELETE route not found'
+  });
+});
+
+// Alternative: Use a more specific catch-all that's Express 5 compatible
+// app.all('*', (req, res) => {
+//   res.status(404).json({
+//     success: false,
+//     message: 'Route not found'
+//   });
+// });
 
 // Global error handler
 app.use((err, req, res, next) => {
@@ -128,11 +152,17 @@ app.use((err, req, res, next) => {
     });
   }
 
-  // Handle path-to-regexp errors
-  if (err instanceof TypeError && err.message.includes('Missing parameter name')) {
-    return res.status(500).json({
+  // Handle multer errors
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({
+        success: false,
+        message: 'File too large'
+      });
+    }
+    return res.status(400).json({
       success: false,
-      message: 'Invalid route parameter configuration',
+      message: 'Upload error',
       error: err.message
     });
   }
