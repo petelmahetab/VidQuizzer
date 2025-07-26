@@ -1,27 +1,29 @@
 import express from 'express';
-import bcrypt from 'bcrypt';
+import bcryptjs from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 import { body, validationResult } from 'express-validator';
+import User from '../models/User.js';
+import authMiddleware from '../middleware/auth.middleware.js';
 
 dotenv.config();
 
 const router = express.Router();
-
-// Simulated user database (replace with actual database in production)
-const users = [];
+const { authenticateToken } = authMiddleware;
 
 // Validation middleware for registration
 const registerValidation = [
   body('email').isEmail().normalizeEmail().withMessage('Invalid email address'),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  body('username').notEmpty().withMessage('Username is required')
+  body('username')
+    .notEmpty().withMessage('Username is required')
+    .isLength({ min: 3, max: 30 }).withMessage('Username must be 3-30 characters'),
 ];
 
 // Validation middleware for login
 const loginValidation = [
   body('email').isEmail().normalizeEmail().withMessage('Invalid email address'),
-  body('password').notEmpty().withMessage('Password is required')
+  body('password').notEmpty().withMessage('Password is required'),
 ];
 
 // Register new user
@@ -32,39 +34,34 @@ router.post('/register', registerValidation, async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'Validation failed',
-        errors: errors.array()
+        errors: errors.array(),
       });
     }
 
     const { email, password, username } = req.body;
 
     // Check if user already exists
-    if (users.find(user => user.email === email)) {
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
       return res.status(409).json({
         success: false,
-        message: 'Email already registered'
+        message: 'Email already registered',
       });
     }
 
-    // Hash password
-    const saltRounds = 10;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
-
-    // Create new user
-    const newUser = {
-      id: Date.now(),
+    // Create new user (password is hashed in User schema pre-save hook)
+    const newUser = new User({
       email,
+      password,
       username,
-      password: hashedPassword,
-      createdAt: new Date()
-    };
+    });
 
-    users.push(newUser);
+    await newUser.save();
 
     // Generate JWT
     const token = jwt.sign(
-      { id: newUser.id, email: newUser.email },
-      process.env.JWT_SECRET || 'your_jwt_secret',
+      { id: newUser._id, email: newUser.email },
+      process.env.JWT_SECRET,
       { expiresIn: '1d' }
     );
 
@@ -72,17 +69,18 @@ router.post('/register', registerValidation, async (req, res) => {
       success: true,
       message: 'User registered successfully',
       data: {
-        id: newUser.id,
+        id: newUser._id,
         email: newUser.email,
         username: newUser.username,
-        token
-      }
+        token,
+      },
     });
   } catch (error) {
+    console.error('Error registering user:', error);
     res.status(500).json({
       success: false,
       message: 'Error registering user',
-      error: error.message
+      error: error.message,
     });
   }
 });
@@ -95,34 +93,34 @@ router.post('/login', loginValidation, async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'Validation failed',
-        errors: errors.array()
+        errors: errors.array(),
       });
     }
 
     const { email, password } = req.body;
 
     // Find user
-    const user = users.find(u => u.email === email);
+    const user = await User.findOne({ email });
     if (!user) {
       return res.status(401).json({
         success: false,
-        message: 'Invalid credentials'
+        message: 'Invalid credentials',
       });
     }
 
     // Verify password
-    const isValidPassword = await bcrypt.compare(password, user.password);
+    const isValidPassword = await user.comparePassword(password);
     if (!isValidPassword) {
       return res.status(401).json({
         success: false,
-        message: 'Invalid credentials'
+        message: 'Invalid credentials',
       });
     }
 
     // Generate JWT
     const token = jwt.sign(
-      { id: user.id, email: user.email },
-      process.env.JWT_SECRET || 'your_jwt_secret',
+      { id: user._id, email: user.email },
+      process.env.JWT_SECRET,
       { expiresIn: '1d' }
     );
 
@@ -130,63 +128,52 @@ router.post('/login', loginValidation, async (req, res) => {
       success: true,
       message: 'Login successful',
       data: {
-        id: user.id,
+        id: user._id,
         email: user.email,
         username: user.username,
-        token
-      }
+        token,
+      },
     });
   } catch (error) {
+    console.error('Error logging in:', error);
     res.status(500).json({
       success: false,
       message: 'Error logging in',
-      error: error.message
+      error: error.message,
     });
   }
 });
 
-// Middleware to verify JWT
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) {
-    return res.status(401).json({
-      success: false,
-      message: 'Access token required'
-    });
-  }
-
-  jwt.verify(token, process.env.JWT_SECRET || 'your_jwt_secret', (err, user) => {
-    if (err) {
-      return res.status(403).json({
+// Get current user (protected route)
+router.get('/me', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select('-password');
+    if (!user) {
+      return res.status(404).json({
         success: false,
-        message: 'Invalid or expired token'
+        message: 'User not found',
       });
     }
-    req.user = user;
-    next();
-  });
-};
 
-// Get current user (protected route)
-router.get('/me', authenticateToken, (req, res) => {
-  const user = users.find(u => u.id === req.user.id);
-  if (!user) {
-    return res.status(404).json({
+    res.json({
+      success: true,
+      data: {
+        id: user._id,
+        email: user.email,
+        username: user.username,
+        plan: user.plan,
+        usage: user.usage,
+        preferences: user.preferences,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching user:', error);
+    res.status(500).json({
       success: false,
-      message: 'User not found'
+      message: 'Error fetching user',
+      error: error.message,
     });
   }
-
-  res.json({
-    success: true,
-    data: {
-      id: user.id,
-      email: user.email,
-      username: user.username
-    }
-  });
 });
 
 export default router;

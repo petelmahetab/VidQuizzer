@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { body, param, query, validationResult } from 'express-validator';
 import Video from '../models/Video.js'
+import User from '../models/User.js'
 import TranscriptionService from '../services/transcription.service.js';
 import AIService from '../services/ai.service.js';
 import authMiddleware from '../middleware/auth.middleware.js';
