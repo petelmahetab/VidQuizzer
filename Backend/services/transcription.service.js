@@ -1,4 +1,4 @@
-// src/services/transcription.service.js
+
 import axios from 'axios';
 import fs from 'fs';
 import FormData from 'form-data';
@@ -186,8 +186,9 @@ class TranscriptionService {
 
   // Extract audio from video using FFmpeg
   async extractAudio(videoPath, outputPath) {
-    return new Promise((resolve, reject) => {
-      const ffmpeg = require('fluent-ffmpeg');
+    return new Promise(async (resolve, reject) => {
+     const ffmpeg = (await import('fluent-ffmpeg')).default;
+
       
       ffmpeg(videoPath)
         .audioCodec('libmp3lame')
@@ -235,8 +236,10 @@ class TranscriptionService {
   async transcribeYouTubeVideo(videoId, options = {}) {
     try {
       // You can use youtube-dl or ytdl-core to get audio URL
-      const ytdl = require('ytdl-core');
-      const info = await ytdl.getInfo(videoId);
+    const ytdl = await import('ytdl-core');
+    const { getInfo } = ytdl;
+
+      const info = await getInfo(videoId);
       
       // Get audio format
       const audioFormat = ytdl.chooseFormat(info.formats, { 
