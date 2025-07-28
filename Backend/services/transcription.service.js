@@ -1,30 +1,78 @@
-
 import axios from 'axios';
 import fs from 'fs';
 import FormData from 'form-data';
+import path from 'path';
+import ffmpeg from 'fluent-ffmpeg';
+import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import ytdl from 'ytdl-core';
+
+// Set FFmpeg path
+try {
+  ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+  console.log('Using ffmpeg-installer path:', ffmpegInstaller.path);
+} catch (error) {
+  console.warn('Falling back to system ffmpeg:', error.message);
+  ffmpeg.setFfmpegPath('ffmpeg');
+}
 
 class TranscriptionService {
   constructor() {
     this.assemblyAIKey = process.env.ASSEMBLYAI_API_KEY;
     this.baseURL = 'https://api.assemblyai.com/v2';
+    // Validate API key
+    if (!this.assemblyAIKey) {
+      console.error('ASSEMBLYAI_API_KEY is not set in environment variables');
+      throw new Error('Missing AssemblyAI API key');
+    }
+    console.log('AssemblyAI API key loaded:', this.assemblyAIKey.slice(0, 4) + '****' + this.assemblyAIKey.slice(-4));
+  }
+
+  // Validate input file for audio streams
+  async validateInputFile(filePath) {
+    return new Promise((resolve, reject) => {
+      const normalizedPath = path.normalize(filePath);
+      console.log('Validating input file:', normalizedPath);
+      ffmpeg.ffprobe(normalizedPath, (err, metadata) => {
+        if (err) {
+          console.error('FFprobe error:', err);
+          return reject(new Error(`Failed to probe file: ${err.message}`));
+        }
+        const audioStream = metadata.streams.find((stream) => stream.codec_type === 'audio');
+        if (!audioStream) {
+          console.error('No audio stream found in:', normalizedPath);
+          return reject(new Error('No audio stream found in input file'));
+        }
+        console.log('Audio stream found:', audioStream.codec_name);
+        resolve(metadata);
+      });
+    });
   }
 
   // Upload audio file to AssemblyAI
   async uploadFile(filePath) {
     try {
+      const normalizedPath = path.normalize(filePath);
+      console.log('Uploading file:', normalizedPath);
       const form = new FormData();
-      form.append('file', fs.createReadStream(filePath));
+      form.append('file', fs.createReadStream(normalizedPath));
 
       const response = await axios.post(`${this.baseURL}/upload`, form, {
         headers: {
           ...form.getHeaders(),
-          'authorization': this.assemblyAIKey
-        }
+          Authorization: this.assemblyAIKey,
+        },
       });
 
+      console.log('File uploaded, URL:', response.data.upload_url);
       return response.data.upload_url;
     } catch (error) {
-      console.error('File upload error:', error);
+      console.error('File upload error:', {
+        message: error.message,
+        status: error.response?.status,
+        statusText: error.response?.statusText,
+        data: error.response?.data,
+        headersSent: error.config?.headers,
+      });
       throw new Error('Failed to upload audio file');
     }
   }
@@ -32,6 +80,7 @@ class TranscriptionService {
   // Submit transcription job
   async submitTranscription(audioUrl, options = {}) {
     try {
+      console.log('Submitting transcription for:', audioUrl);
       const config = {
         audio_url: audioUrl,
         speaker_labels: true,
@@ -42,19 +91,25 @@ class TranscriptionService {
         punctuate: true,
         format_text: true,
         language_detection: true,
-        ...options
+        ...options,
       };
 
       const response = await axios.post(`${this.baseURL}/transcript`, config, {
         headers: {
-          'authorization': this.assemblyAIKey,
-          'content-type': 'application/json'
-        }
+          Authorization: this.assemblyAIKey,
+          'Content-Type': 'application/json',
+        },
       });
 
+      console.log('Transcription job submitted, ID:', response.data.id);
       return response.data;
     } catch (error) {
-      console.error('Transcription submission error:', error);
+      console.error('Transcription submission error:', {
+        message: error.message,
+        status: error.response?.status,
+        statusText: error.response?.statusText,
+        data: error.response?.data,
+      });
       throw new Error('Failed to submit transcription');
     }
   }
@@ -62,15 +117,21 @@ class TranscriptionService {
   // Get transcription result
   async getTranscriptionResult(transcriptId) {
     try {
+      console.log('Fetching transcription result for ID:', transcriptId);
       const response = await axios.get(`${this.baseURL}/transcript/${transcriptId}`, {
         headers: {
-          'authorization': this.assemblyAIKey
-        }
+          Authorization: this.assemblyAIKey,
+        },
       });
 
       return response.data;
     } catch (error) {
-      console.error('Transcription result error:', error);
+      console.error('Transcription result error:', {
+        message: error.message,
+        status: error.response?.status,
+        statusText: error.response?.statusText,
+        data: error.response?.data,
+      });
       throw new Error('Failed to get transcription result');
     }
   }
@@ -78,26 +139,28 @@ class TranscriptionService {
   // Poll for transcription completion
   async pollTranscription(transcriptId, maxAttempts = 60) {
     let attempts = 0;
-    
+
     while (attempts < maxAttempts) {
       try {
         const result = await this.getTranscriptionResult(transcriptId);
-        
+
         if (result.status === 'completed') {
+          console.log('Transcription completed for ID:', transcriptId);
           return this.processTranscriptionResult(result);
         } else if (result.status === 'error') {
+          console.error('Transcription failed:', result.error);
           throw new Error(`Transcription failed: ${result.error}`);
         }
-        
-        // Wait 5 seconds before next attempt
-        await new Promise(resolve => setTimeout(resolve, 5000));
+
+        console.log(`Attempt ${attempts + 1}/${maxAttempts}: Transcription status: ${result.status}`);
+        await new Promise((resolve) => setTimeout(resolve, 5000));
         attempts++;
       } catch (error) {
         console.error('Polling error:', error);
         throw error;
       }
     }
-    
+
     throw new Error('Transcription timeout');
   }
 
@@ -112,72 +175,66 @@ class TranscriptionService {
       chapters: [],
       entities: [],
       sentiment: null,
-      highlights: []
+      highlights: [],
     };
 
-    // Process words with timestamps
     if (result.words) {
-      processed.timestamped = result.words.map(word => ({
-        start: word.start / 1000, // Convert to seconds
+      processed.timestamped = result.words.map((word) => ({
+        start: word.start / 1000,
         end: word.end / 1000,
         text: word.text,
-        confidence: word.confidence
+        confidence: word.confidence,
       }));
     }
 
-    // Process speaker labels
     if (result.utterances) {
-      processed.speakers = result.utterances.map(utterance => ({
+      processed.speakers = result.utterances.map((utterance) => ({
         speaker: utterance.speaker,
         start: utterance.start / 1000,
         end: utterance.end / 1000,
         text: utterance.text,
-        confidence: utterance.confidence
+        confidence: utterance.confidence,
       }));
     }
 
-    // Process chapters
     if (result.chapters) {
-      processed.chapters = result.chapters.map(chapter => ({
+      processed.chapters = result.chapters.map((chapter) => ({
         start: chapter.start / 1000,
         end: chapter.end / 1000,
         headline: chapter.headline,
         gist: chapter.gist,
-        summary: chapter.summary
+        summary: chapter.summary,
       }));
     }
 
-    // Process entities
     if (result.entities) {
-      processed.entities = result.entities.map(entity => ({
+      processed.entities = result.entities.map((entity) => ({
         start: entity.start / 1000,
         end: entity.end / 1000,
         text: entity.text,
-        entityType: entity.entity_type
+        entityType: entity.entity_type,
       }));
     }
 
-    // Process sentiment
     if (result.sentiment_analysis_results) {
-      processed.sentiment = result.sentiment_analysis_results.map(sentiment => ({
+      processed.sentiment = result.sentiment_analysis_results.map((sentiment) => ({
         start: sentiment.start / 1000,
         end: sentiment.end / 1000,
         text: sentiment.text,
         sentiment: sentiment.sentiment,
-        confidence: sentiment.confidence
+        confidence: sentiment.confidence,
       }));
     }
 
-    // Process highlights
     if (result.auto_highlights_result) {
-      processed.highlights = result.auto_highlights_result.results.map(highlight => ({
+      processed.highlights = result.auto_highlights_result.results.map((highlight) => ({
         text: highlight.text,
         count: highlight.count,
         rank: highlight.rank,
-        timestamps: highlight.timestamps.map(ts => ({
+        timestamps: highlight.timestamps.map((ts) => ({
           start: ts.start / 1000,
-          end: ts.end / 1000
-        }))
+          end: ts.end / 1000,
+        })),
       }));
     }
 
@@ -186,48 +243,73 @@ class TranscriptionService {
 
   // Extract audio from video using FFmpeg
   async extractAudio(videoPath, outputPath) {
-    return new Promise(async (resolve, reject) => {
-     const ffmpeg = (await import('fluent-ffmpeg')).default;
+    return new Promise((resolve, reject) => {
+      const normalizedVideoPath = path.normalize(videoPath);
+      const normalizedOutputPath = path.normalize(outputPath);
+      console.log('FFmpeg extracting audio from:', normalizedVideoPath, 'to:', normalizedOutputPath);
 
-      
-      ffmpeg(videoPath)
-        .audioCodec('libmp3lame')
-        .audioBitrate('128k')
-        .format('mp3')
-        .on('end', () => {
-          console.log('Audio extraction completed');
-          resolve(outputPath);
+      this.validateInputFile(normalizedVideoPath)
+        .then(() => {
+          ffmpeg(normalizedVideoPath)
+            .noVideo()
+            .audioCodec('libmp3lame')
+            .audioBitrate('128k')
+            .format('mp3')
+            .on('start', (commandLine) => {
+              console.log('FFmpeg command:', commandLine);
+            })
+            .on('end', () => {
+              console.log('Audio extraction completed:', normalizedOutputPath);
+              resolve(normalizedOutputPath);
+            })
+            .on('error', (err) => {
+              console.error('Audio extraction error:', err);
+              reject(err);
+            })
+            .save(normalizedOutputPath);
         })
-        .on('error', (err) => {
-          console.error('Audio extraction error:', err);
+        .catch((err) => {
+          console.error('Input validation error:', err);
           reject(err);
-        })
-        .save(outputPath);
+        });
     });
   }
 
   // Complete transcription workflow
   async transcribeVideo(videoPath, options = {}) {
+    let audioPath = null;
     try {
-      // Extract audio from video
-      const audioPath = videoPath.replace(/\.[^/.]+$/, '.mp3');
-      await this.extractAudio(videoPath, audioPath);
+      const normalizedVideoPath = path.normalize(videoPath);
+      audioPath = path.join(
+        path.dirname(normalizedVideoPath),
+        path.basename(normalizedVideoPath, path.extname(normalizedVideoPath)) + '.mp3'
+      );
+      console.log('Transcribing video:', normalizedVideoPath, 'Audio output:', audioPath);
 
-      // Upload audio file
+      if (!fs.existsSync(normalizedVideoPath)) {
+        throw new Error(`Video file not found: ${normalizedVideoPath}`);
+      }
+
+      await this.extractAudio(normalizedVideoPath, audioPath);
+
       const audioUrl = await this.uploadFile(audioPath);
 
-      // Submit transcription
       const transcriptionJob = await this.submitTranscription(audioUrl, options);
 
-      // Poll for completion
       const result = await this.pollTranscription(transcriptionJob.id);
 
-      // Clean up audio file
-      fs.unlinkSync(audioPath);
+      if (fs.existsSync(audioPath)) {
+        fs.unlinkSync(audioPath);
+        console.log('Cleaned up audio file:', audioPath);
+      }
 
       return result;
     } catch (error) {
       console.error('Video transcription error:', error);
+      if (audioPath && fs.existsSync(audioPath)) {
+        fs.unlinkSync(audioPath);
+        console.log('Cleaned up audio file on error:', audioPath);
+      }
       throw error;
     }
   }
@@ -235,27 +317,23 @@ class TranscriptionService {
   // Get transcription from YouTube video
   async transcribeYouTubeVideo(videoId, options = {}) {
     try {
-      // You can use youtube-dl or ytdl-core to get audio URL
-    const ytdl = await import('ytdl-core');
-    const { getInfo } = ytdl;
+      console.log('Transcribing YouTube video ID:', videoId);
+      const info = await ytdl.getInfo(videoId);
 
-      const info = await getInfo(videoId);
-      
-      // Get audio format
-      const audioFormat = ytdl.chooseFormat(info.formats, { 
+      const audioFormat = ytdl.chooseFormat(info.formats, {
         quality: 'highestaudio',
-        filter: 'audioonly' 
+        filter: 'audioonly',
       });
 
       if (!audioFormat) {
         throw new Error('No audio format found');
       }
 
-      // Submit transcription directly with audio URL
+      console.log('Selected audio format:', audioFormat.url);
       const transcriptionJob = await this.submitTranscription(audioFormat.url, options);
 
-      // Poll for completion
       const result = await this.pollTranscription(transcriptionJob.id);
+      console.log('YouTube transcription completed:', result.text.substring(0, 100) + '...');
 
       return result;
     } catch (error) {
@@ -286,7 +364,7 @@ class TranscriptionService {
       { code: 'vi', name: 'Vietnamese' },
       { code: 'ms', name: 'Malay' },
       { code: 'th', name: 'Thai' },
-      { code: 'fi', name: 'Finnish' }
+      { code: 'fi', name: 'Finnish' },
     ];
   }
 }

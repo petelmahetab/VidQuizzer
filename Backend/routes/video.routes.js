@@ -4,15 +4,22 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import { body, param, query, validationResult } from 'express-validator';
-import Video from '../models/Video.js'
-import User from '../models/User.js'
+import Video from '../models/Video.js';
+import User from '../models/User.js';
 import TranscriptionService from '../services/transcription.service.js';
 import AIService from '../services/ai.service.js';
 import authMiddleware from '../middleware/auth.middleware.js';
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+// Set FFmpeg path with fallback to system FFmpeg
+try {
+  ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+  console.log('Using ffmpeg-installer path:', ffmpegInstaller.path);
+} catch (error) {
+  console.warn('Failed to set ffmpeg-installer path, falling back to system ffmpeg:', error.message);
+  ffmpeg.setFfmpegPath('ffmpeg');
+}
 
 const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
@@ -21,15 +28,26 @@ const __dirname = path.dirname(__filename);
 // Configure multer for video uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    const uploadDir = path.resolve(__dirname, '..', 'Uploads', 'videos');
+    const uploadDir = path.normalize(path.resolve(__dirname, '..', 'uploads', 'videos'));
+    console.log('Multer destination:', uploadDir);
     if (!fs.existsSync(uploadDir)) {
       fs.mkdirSync(uploadDir, { recursive: true });
+      console.log('Created upload directory:', uploadDir);
     }
-    cb(null, uploadDir);
+    // Verify write permissions
+    fs.access(uploadDir, fs.constants.W_OK, (err) => {
+      if (err) {
+        console.error('No write permission for upload directory:', err);
+        return cb(new Error('No write permission for upload directory'));
+      }
+      cb(null, uploadDir);
+    });
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+    const filename = file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname);
+    console.log('Generated filename:', filename);
+    cb(null, filename);
   },
 });
 
@@ -43,6 +61,7 @@ const upload = multer({
     if (mimetype && extname) {
       return cb(null, true);
     }
+    console.error('Invalid file type:', file.originalname);
     cb(new Error('Only video files are allowed'));
   },
 });
@@ -147,29 +166,51 @@ router.post('/', authenticateToken, checkVideoLimit, upload.single('video'), val
     }
 
     const { title = 'Untitled Video', description = '', isPublic = false, tags = [] } = req.body;
+    const videoPath = path.normalize(req.file.path);
+    console.log('Uploaded video path:', videoPath);
+
+    // Verify video file exists
+    if (!fs.existsSync(videoPath)) {
+      return res.status(400).json({ success: false, message: 'Uploaded video file not found' });
+    }
 
     // Generate thumbnail
-    const thumbnailDir = path.resolve(__dirname, '..', 'Uploads', 'thumbnails');
+    const thumbnailDir = path.normalize(path.resolve(__dirname, '..', 'uploads', 'thumbnails'));
+    console.log('Thumbnail directory:', thumbnailDir);
     if (!fs.existsSync(thumbnailDir)) {
       fs.mkdirSync(thumbnailDir, { recursive: true });
+      console.log('Created thumbnail directory:', thumbnailDir);
     }
     const thumbnailPath = path.join(thumbnailDir, `thumbnail-${Date.now()}.jpg`);
     await new Promise((resolve, reject) => {
-      ffmpeg(req.file.path)
+      ffmpeg(videoPath)
         .screenshots({
           count: 1,
           folder: thumbnailDir,
           filename: path.basename(thumbnailPath),
           size: '320x240',
         })
-        .on('end', resolve)
-        .on('error', reject);
+        .on('start', (commandLine) => {
+          console.log('FFmpeg thumbnail command:', commandLine);
+        })
+        .on('end', () => {
+          console.log('Thumbnail generated:', thumbnailPath);
+          resolve();
+        })
+        .on('error', (err) => {
+          console.error('Thumbnail generation error:', err);
+          reject(err);
+        });
     });
 
     // Get video metadata
     const metadata = await new Promise((resolve, reject) => {
-      ffmpeg.ffprobe(req.file.path, (err, data) => {
-        if (err) return reject(err);
+      ffmpeg.ffprobe(videoPath, (err, data) => {
+        if (err) {
+          console.error('FFprobe error:', err);
+          return reject(err);
+        }
+        console.log('FFprobe metadata:', data);
         resolve(data);
       });
     });
@@ -178,7 +219,7 @@ router.post('/', authenticateToken, checkVideoLimit, upload.single('video'), val
       user: req.user._id,
       title,
       description,
-      filePath: req.file.path,
+      filePath: videoPath,
       fileSize: req.file.size,
       thumbnail: thumbnailPath,
       isPublic,
@@ -196,6 +237,7 @@ router.post('/', authenticateToken, checkVideoLimit, upload.single('video'), val
     });
 
     await newVideo.save();
+    console.log('Video saved to MongoDB:', newVideo._id);
 
     // Update user video count
     await User.findByIdAndUpdate(req.user._id, {
@@ -205,7 +247,9 @@ router.post('/', authenticateToken, checkVideoLimit, upload.single('video'), val
     // Trigger transcription and summarization
     (async () => {
       try {
+        console.log('Starting transcription for video:', newVideo._id);
         const transcription = await TranscriptionService.transcribeVideo(newVideo.filePath);
+        console.log('Transcription completed:', transcription.text.substring(0, 100) + '...');
         await Video.findByIdAndUpdate(newVideo._id, {
           status: 'processing',
           processingStage: 'summarization',
@@ -216,17 +260,20 @@ router.post('/', authenticateToken, checkVideoLimit, upload.single('video'), val
           },
         });
 
+        console.log('Starting summarization for video:', newVideo._id);
         const summary = await AIService.generateSummary(transcription.text);
+        console.log('Summarization completed:', summary.content.substring(0, 100) + '...');
         await Video.findByIdAndUpdate(newVideo._id, {
           status: 'completed',
           processingStage: 'completed',
           transcript: { text: summary.content, language: transcription.language },
         });
       } catch (error) {
-        console.error('Processing error:', error);
+        console.error('Processing error for video', newVideo._id, ':', error);
         await Video.findByIdAndUpdate(newVideo._id, {
           status: 'failed',
           processingStage: 'failed',
+          error: error.message,
         });
       }
     })();
@@ -238,6 +285,11 @@ router.post('/', authenticateToken, checkVideoLimit, upload.single('video'), val
     });
   } catch (error) {
     console.error('Upload error:', error);
+    // Clean up uploaded file on error
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+      console.log('Cleaned up video file:', req.file.path);
+    }
     res.status(500).json({
       success: false,
       message: 'Error uploading video',
@@ -351,13 +403,14 @@ router.get('/:id/stream', authenticateToken, [
       return res.status(404).json({ success: false, message: 'Video file not found' });
     }
 
-    if (!fs.existsSync(video.filePath)) {
+    const videoPath = path.normalize(video.filePath);
+    if (!fs.existsSync(videoPath)) {
       return res.status(404).json({ success: false, message: 'Video file not found on server' });
     }
 
     await Video.findByIdAndUpdate(video._id, { $inc: { views: 1 } });
 
-    const stat = fs.statSync(video.filePath);
+    const stat = fs.statSync(videoPath);
     const fileSize = stat.size;
     const range = req.headers.range;
 
@@ -366,7 +419,7 @@ router.get('/:id/stream', authenticateToken, [
       const start = parseInt(parts[0], 10);
       const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
       const chunksize = (end - start) + 1;
-      const file = fs.createReadStream(video.filePath, { start, end });
+      const file = fs.createReadStream(videoPath, { start, end });
 
       const head = {
         'Content-Range': `bytes ${start}-${end}/${fileSize}`,
@@ -384,7 +437,7 @@ router.get('/:id/stream', authenticateToken, [
       };
 
       res.writeHead(200, head);
-      fs.createReadStream(video.filePath).pipe(res);
+      fs.createReadStream(videoPath).pipe(res);
     }
   } catch (error) {
     console.error('Streaming error:', error);
@@ -441,11 +494,12 @@ router.get('/:id/thumbnail', authenticateToken, [
       return res.status(404).json({ success: false, message: 'Thumbnail not found' });
     }
 
-    if (!fs.existsSync(video.thumbnail)) {
+    const thumbnailPath = path.normalize(video.thumbnail);
+    if (!fs.existsSync(thumbnailPath)) {
       return res.status(404).json({ success: false, message: 'Thumbnail file not found' });
     }
 
-    res.sendFile(video.thumbnail);
+    res.sendFile(thumbnailPath);
   } catch (error) {
     console.error('Thumbnail error:', error);
     res.status(500).json({
