@@ -19,6 +19,8 @@ class TranscriptionService {
   constructor() {
     this.assemblyAIKey = process.env.ASSEMBLYAI_API_KEY;
     this.baseURL = 'https://api.assemblyai.com/v2';
+    // console.log(process.env.ASSEMBLYAI_API_KEY)
+    // console.log('ASSEMBLYAI_API_KEY:', process.env.ASSEMBLYAI_API_KEY ? 'Loaded' : 'Not Loaded');
     // Validate API key
     if (!this.assemblyAIKey) {
       console.error('ASSEMBLYAI_API_KEY is not set in environment variables');
@@ -276,43 +278,54 @@ class TranscriptionService {
   }
 
   // Complete transcription workflow
-  async transcribeVideo(videoPath, options = {}) {
-    let audioPath = null;
-    try {
-      const normalizedVideoPath = path.normalize(videoPath);
-      audioPath = path.join(
-        path.dirname(normalizedVideoPath),
-        path.basename(normalizedVideoPath, path.extname(normalizedVideoPath)) + '.mp3'
-      );
-      console.log('Transcribing video:', normalizedVideoPath, 'Audio output:', audioPath);
+ async transcribeVideo(videoPath, options = {}) {
+  let audioPath = null;
+  const normalizedVideoPath = path.normalize(videoPath);
+  try {
+    audioPath = path.join(
+      path.dirname(normalizedVideoPath),
+      path.basename(normalizedVideoPath, path.extname(normalizedVideoPath)) + '.mp3'
+    );
+    console.log('Transcribing file:', normalizedVideoPath, 'Audio output:', audioPath);
 
-      if (!fs.existsSync(normalizedVideoPath)) {
-        throw new Error(`Video file not found: ${normalizedVideoPath}`);
-      }
+    if (!fs.existsSync(normalizedVideoPath)) {
+      throw new Error(`File not found: ${normalizedVideoPath}`);
+    }
 
+    // Skip extraction if already an MP3
+    if (path.extname(normalizedVideoPath).toLowerCase() === '.mp3') {
+      console.log('File is already MP3, skipping extraction:', normalizedVideoPath);
+      audioPath = normalizedVideoPath;
+    } else {
       await this.extractAudio(normalizedVideoPath, audioPath);
+    }
 
-      const audioUrl = await this.uploadFile(audioPath);
+    // Validate audio file duration
+    const metadata = await new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(audioPath, (err, data) => (err ? reject(err) : resolve(data)));
+    });
+    if (metadata.format.duration === 0 || !metadata.streams.some(s => s.codec_type === 'audio')) {
+      throw new Error('No valid audio content detected in the file');
+    }
 
-      const transcriptionJob = await this.submitTranscription(audioUrl, options);
+    const audioUrl = await this.uploadFile(audioPath);
 
-      const result = await this.pollTranscription(transcriptionJob.id);
+    const transcriptionJob = await this.submitTranscription(audioUrl, options);
 
-      if (fs.existsSync(audioPath)) {
-        fs.unlinkSync(audioPath);
-        console.log('Cleaned up audio file:', audioPath);
-      }
+    const result = await this.pollTranscription(transcriptionJob.id);
 
-      return result;
-    } catch (error) {
-      console.error('Video transcription error:', error);
-      if (audioPath && fs.existsSync(audioPath)) {
-        fs.unlinkSync(audioPath);
-        console.log('Cleaned up audio file on error:', audioPath);
-      }
-      throw error;
+    return result;
+  } catch (error) {
+    console.error('File transcription error:', error);
+    throw error; // Re-throw to handle in the calling route
+  } finally {
+    // Cleanup audio file if it exists and is different from the original
+    if (audioPath && fs.existsSync(audioPath) && audioPath !== normalizedVideoPath) {
+      fs.unlinkSync(audioPath);
+      console.log('Cleaned up audio file:', audioPath);
     }
   }
+}
 
   // Get transcription from YouTube video
   async transcribeYouTubeVideo(videoId, options = {}) {
@@ -369,4 +382,4 @@ class TranscriptionService {
   }
 }
 
-export default new TranscriptionService();
+export default TranscriptionService;

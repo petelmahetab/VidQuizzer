@@ -153,102 +153,96 @@ router.get('/:id', authenticateToken, [
   }
 });
 
+const transcriptionService = new TranscriptionService();
 // Upload new video
 router.post('/', authenticateToken, checkVideoLimit, upload.single('video'), validateVideo, async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      console.log('Validation errors:', errors.array());
       return res.status(400).json({ success: false, errors: errors.array() });
     }
 
     if (!req.file) {
-      return res.status(400).json({ success: false, message: 'No video file provided' });
+      return res.status(400).json({ success: false, message: 'No file provided' });
     }
 
-    const { title = 'Untitled Video', description = '', isPublic = false, tags = [] } = req.body;
-    const videoPath = path.normalize(req.file.path);
-    console.log('Uploaded video path:', videoPath);
+    let { title = 'Untitled File', description = '', isPublic = false, tags = [] } = req.body;
+    console.log('Received request body:', req.body);
 
-    // Verify video file exists
-    if (!fs.existsSync(videoPath)) {
-      return res.status(400).json({ success: false, message: 'Uploaded video file not found' });
+    if (typeof tags === 'string') {
+      try {
+        tags = JSON.parse(tags);
+      } catch (e) {
+        console.error('Failed to parse tags:', e);
+        tags = [];
+      }
+    } else if (!Array.isArray(tags)) {
+      console.warn('Tags is not an array, defaulting to empty array');
+      tags = [];
     }
 
-    // Generate thumbnail
-    const thumbnailDir = path.normalize(path.resolve(__dirname, '..', 'uploads', 'thumbnails'));
-    console.log('Thumbnail directory:', thumbnailDir);
-    if (!fs.existsSync(thumbnailDir)) {
-      fs.mkdirSync(thumbnailDir, { recursive: true });
-      console.log('Created thumbnail directory:', thumbnailDir);
-    }
-    const thumbnailPath = path.join(thumbnailDir, `thumbnail-${Date.now()}.jpg`);
-    await new Promise((resolve, reject) => {
-      ffmpeg(videoPath)
-        .screenshots({
-          count: 1,
-          folder: thumbnailDir,
-          filename: path.basename(thumbnailPath),
-          size: '320x240',
-        })
-        .on('start', (commandLine) => {
-          console.log('FFmpeg thumbnail command:', commandLine);
-        })
-        .on('end', () => {
-          console.log('Thumbnail generated:', thumbnailPath);
-          resolve();
-        })
-        .on('error', (err) => {
-          console.error('Thumbnail generation error:', err);
-          reject(err);
-        });
-    });
+    const filePath = path.normalize(req.file.path);
+    console.log('Uploaded file path:', filePath);
 
-    // Get video metadata
-    const metadata = await new Promise((resolve, reject) => {
-      ffmpeg.ffprobe(videoPath, (err, data) => {
-        if (err) {
-          console.error('FFprobe error:', err);
-          return reject(err);
-        }
-        console.log('FFprobe metadata:', data);
-        resolve(data);
+    if (!fs.existsSync(filePath)) {
+      return res.status(400).json({ success: false, message: 'Uploaded file not found' });
+    }
+
+    let thumbnailPath = null;
+    if (req.fileType === 'video') {
+      const thumbnailDir = path.normalize(path.resolve(__dirname, '..', 'uploads', 'thumbnails'));
+      if (!fs.existsSync(thumbnailDir)) {
+        fs.mkdirSync(thumbnailDir, { recursive: true });
+      }
+      thumbnailPath = path.join(thumbnailDir, `thumbnail-${Date.now()}.jpg`);
+      await new Promise((resolve, reject) => {
+        ffmpeg(filePath)
+          .screenshots({
+            count: 1,
+            folder: thumbnailDir,
+            filename: path.basename(thumbnailPath),
+            size: '320x240',
+          })
+          .on('end', resolve)
+          .on('error', reject);
       });
+    }
+
+    const metadata = await new Promise((resolve, reject) => {
+      ffmpeg.ffprobe(filePath, (err, data) => (err ? reject(err) : resolve(data)));
     });
 
     const newVideo = new Video({
       user: req.user._id,
       title,
       description,
-      filePath: videoPath,
+      filePath,
       fileSize: req.file.size,
       thumbnail: thumbnailPath,
       isPublic,
       tags,
-      duration: metadata.format.duration,
+      duration: metadata.format.duration || 0,
       metadata: {
         format: metadata.format.format_name,
-        codec: metadata.streams[0]?.codec_name,
+        codec: metadata.streams.find(s => s.codec_type === (req.fileType === 'video' ? 'video' : 'audio'))?.codec_name,
         bitrate: metadata.format.bit_rate,
-        resolution: `${metadata.streams[0]?.width}x${metadata.streams[0]?.height}`,
-        fps: eval(metadata.streams[0]?.r_frame_rate),
+        resolution: req.fileType === 'video' ? `${metadata.streams[0]?.width}x${metadata.streams[0]?.height}` : null,
+        fps: req.fileType === 'video' ? eval(metadata.streams[0]?.r_frame_rate) : null,
         uploadedAt: new Date(),
       },
       status: 'uploading',
     });
 
     await newVideo.save();
-    console.log('Video saved to MongoDB:', newVideo._id);
+    console.log('File saved to MongoDB:', newVideo._id);
 
-    // Update user video count
-    await User.findByIdAndUpdate(req.user._id, {
-      $inc: { 'usage.videosProcessed': 1 },
-    });
+    await User.findByIdAndUpdate(req.user._id, { $inc: { 'usage.videosProcessed': 1 } });
 
-    // Trigger transcription and summarization
     (async () => {
       try {
-        console.log('Starting transcription for video:', newVideo._id);
-        const transcription = await TranscriptionService.transcribeVideo(newVideo.filePath);
+        console.log('Starting transcription for file:', newVideo._id);
+        const transcription = await transcriptionService.transcribeVideo(filePath);
         console.log('Transcription completed:', transcription.text.substring(0, 100) + '...');
         await Video.findByIdAndUpdate(newVideo._id, {
           status: 'processing',
@@ -260,44 +254,49 @@ router.post('/', authenticateToken, checkVideoLimit, upload.single('video'), val
           },
         });
 
-        console.log('Starting summarization for video:', newVideo._id);
+        console.log('Starting summarization for file:', newVideo._id);
         const summary = await AIService.generateSummary(transcription.text);
         console.log('Summarization completed:', summary.content.substring(0, 100) + '...');
         await Video.findByIdAndUpdate(newVideo._id, {
           status: 'completed',
           processingStage: 'completed',
-          transcript: { text: summary.content, language: transcription.language },
+          summary: {
+            text: summary.content,
+            generatedAt: summary.generatedAt,
+            model: 'gemini',
+          },
         });
       } catch (error) {
-        console.error('Processing error for video', newVideo._id, ':', error);
+        console.error('Processing error for file', newVideo._id, ':', error.message);
+        const errorMessage = error.message.includes('no spoken audio') || error.message.includes('no valid audio content')
+          ? 'No audible content detected in the file'
+          : error.message;
         await Video.findByIdAndUpdate(newVideo._id, {
           status: 'failed',
           processingStage: 'failed',
-          error: error.message,
+          error: errorMessage,
         });
       }
     })();
 
     res.status(201).json({
       success: true,
-      message: 'Video uploaded successfully',
+      message: 'File uploaded successfully',
       data: newVideo,
     });
   } catch (error) {
     console.error('Upload error:', error);
-    // Clean up uploaded file on error
     if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
-      console.log('Cleaned up video file:', req.file.path);
+      console.log('Cleaned up file:', req.file.path);
     }
     res.status(500).json({
       success: false,
-      message: 'Error uploading video',
+      message: 'Error uploading file',
       error: error.message,
     });
   }
 });
-
 // Update video
 router.put('/:id', authenticateToken, [
   param('id').isMongoId().withMessage('Invalid video ID'),
