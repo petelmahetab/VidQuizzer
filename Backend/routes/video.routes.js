@@ -22,6 +22,7 @@ try {
 }
 
 const router = express.Router();
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -300,6 +301,7 @@ router.post('/', authenticateToken, checkVideoLimit, upload.single('video'), val
 // Update video
 router.put('/:id', authenticateToken, [
   param('id').isMongoId().withMessage('Invalid video ID'),
+  upload.single('video'),
   ...validateVideo,
 ], async (req, res) => {
   try {
@@ -309,7 +311,7 @@ router.put('/:id', authenticateToken, [
     }
 
     const { title, description, isPublic, tags } = req.body;
-    if (!title && !description && isPublic === undefined && !tags) {
+    if (!title && !description && isPublic === undefined && !tags && !req.file) {
       return res.status(400).json({
         success: false,
         message: 'At least one field (title, description, isPublic, or tags) is required',
@@ -319,8 +321,14 @@ router.put('/:id', authenticateToken, [
     const updateData = {};
     if (title) updateData.title = title;
     if (description) updateData.description = description;
-    if (isPublic !== undefined) updateData.isPublic = isPublic;
-    if (tags) updateData.tags = tags;
+     if (isPublic !== undefined) updateData.isPublic = (isPublic === 'true'); // convert string to boolean
+    if (tags) {
+      if (Array.isArray(tags)) updateData.tags = tags;
+      else updateData.tags = [tags]; // handle single tag
+    }
+    if (req.file) {
+      updateData.filePath = req.file.path; // or your cloud upload logic
+    }
 
     const video = await Video.findOneAndUpdate(
       { _id: req.params.id, user: req.user._id },
