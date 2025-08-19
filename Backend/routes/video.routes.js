@@ -155,6 +155,7 @@ router.get('/:id', authenticateToken, [
 });
 
 const transcriptionService = new TranscriptionService();
+
 // Upload new video
 router.post('/', authenticateToken, checkVideoLimit, upload.single('video'), validateVideo, async (req, res) => {
   try {
@@ -191,23 +192,47 @@ router.post('/', authenticateToken, checkVideoLimit, upload.single('video'), val
     }
 
     let thumbnailPath = null;
-    if (req.fileType === 'video') {
-      const thumbnailDir = path.normalize(path.resolve(__dirname, '..', 'uploads', 'thumbnails'));
+    const isVideo = req.file.mimetype.startsWith('video/');
+    if (isVideo) {
+      const thumbnailDir = path.resolve(__dirname, '..', 'Uploads', 'thumbnails');
       if (!fs.existsSync(thumbnailDir)) {
         fs.mkdirSync(thumbnailDir, { recursive: true });
       }
-      thumbnailPath = path.join(thumbnailDir, `thumbnail-${Date.now()}.jpg`);
-      await new Promise((resolve, reject) => {
-        ffmpeg(filePath)
-          .screenshots({
-            count: 1,
-            folder: thumbnailDir,
-            filename: path.basename(thumbnailPath),
-            size: '320x240',
-          })
-          .on('end', resolve)
-          .on('error', reject);
-      });
+      thumbnailPath = path.join(thumbnailDir, `thumbnail-${req.file.filename}.jpg`);
+
+      try {
+        await new Promise((resolve, reject) => {
+          ffmpeg(filePath)
+            .screenshots({
+              count: 1,
+              folder: thumbnailDir,
+              filename: path.basename(thumbnailPath),
+              size: '320x240',
+              timemarks: ['5'],
+            })
+            .on('end', () => {
+              console.log('Thumbnail generated successfully:', thumbnailPath);
+              resolve();
+            })
+            .on('error', (err, stdout, stderr) => {
+              console.error('Thumbnail generation failed:', err.message);
+              console.error('FFmpeg stdout:', stdout);
+              console.error('FFmpeg stderr:', stderr);
+              reject(new Error(`Thumbnail generation failed: ${err.message}`));
+            });
+        });
+
+        if (!fs.existsSync(thumbnailPath)) {
+          throw new Error('Thumbnail file not created');
+        }
+      } catch (err) {
+        console.warn('Thumbnail generation failed:', err.message);
+        thumbnailPath = path.join(__dirname, '..', 'Uploads', 'thumbnails', 'default-thumbnail.jpg');
+        if (!fs.existsSync(thumbnailPath)) {
+          console.warn('Default thumbnail not found, setting thumbnailPath to null');
+          thumbnailPath = null;
+        }
+      }
     }
 
     const metadata = await new Promise((resolve, reject) => {
@@ -226,10 +251,10 @@ router.post('/', authenticateToken, checkVideoLimit, upload.single('video'), val
       duration: metadata.format.duration || 0,
       metadata: {
         format: metadata.format.format_name,
-        codec: metadata.streams.find(s => s.codec_type === (req.fileType === 'video' ? 'video' : 'audio'))?.codec_name,
+        codec: metadata.streams.find(s => s.codec_type === 'video')?.codec_name,
         bitrate: metadata.format.bit_rate,
-        resolution: req.fileType === 'video' ? `${metadata.streams[0]?.width}x${metadata.streams[0]?.height}` : null,
-        fps: req.fileType === 'video' ? eval(metadata.streams[0]?.r_frame_rate) : null,
+        resolution: isVideo ? `${metadata.streams[0]?.width}x${metadata.streams[0]?.height}` : null,
+        fps: isVideo ? eval(metadata.streams[0]?.r_frame_rate) : null,
         uploadedAt: new Date(),
       },
       status: 'uploading',
@@ -298,6 +323,7 @@ router.post('/', authenticateToken, checkVideoLimit, upload.single('video'), val
     });
   }
 });
+
 // Update video
 router.put('/:id', authenticateToken, [
   param('id').isMongoId().withMessage('Invalid video ID'),
@@ -494,21 +520,69 @@ router.get('/:id/thumbnail', authenticateToken, [
       return res.status(400).json({ success: false, errors: errors.array() });
     }
 
-    const video = await Video.findOne({ _id: req.params.id, user: req.user._id })
-      .select('thumbnail')
-      .lean();
-    if (!video || !video.thumbnail) {
-      return res.status(404).json({ success: false, message: 'Thumbnail not found' });
+    const video = await Video.findOne({ _id: req.params.id, user: req.user._id }).lean();
+    if (!video) {
+      return res.status(404).json({ success: false, message: 'Video not found' });
     }
 
-    const thumbnailPath = path.normalize(video.thumbnail);
-    if (!fs.existsSync(thumbnailPath)) {
-      return res.status(404).json({ success: false, message: 'Thumbnail file not found' });
+    let thumbnailPath = video.thumbnail ? path.normalize(video.thumbnail) : null;
+
+    // Check if thumbnail exists; if not, attempt to regenerate or use default
+    if (!thumbnailPath || !fs.existsSync(thumbnailPath)) {
+      console.warn(`Thumbnail not found for video ${req.params.id}: ${thumbnailPath}`);
+      const filePath = path.normalize(video.filePath);
+      if (!fs.existsSync(filePath)) {
+        return res.status(404).json({ success: false, message: 'Video file not found for thumbnail regeneration' });
+      }
+
+      const thumbnailDir = path.resolve(__dirname, '..', 'Uploads', 'thumbnails');
+      if (!fs.existsSync(thumbnailDir)) {
+        fs.mkdirSync(thumbnailDir, { recursive: true });
+      }
+      thumbnailPath = path.join(thumbnailDir, `thumbnail-${video._id}.jpg`);
+
+      try {
+        await new Promise((resolve, reject) => {
+          ffmpeg(filePath)
+            .screenshots({
+              count: 1,
+              folder: thumbnailDir,
+              filename: path.basename(thumbnailPath),
+              size: '320x240',
+              timemarks: ['5'],
+            })
+            .on('end', () => {
+              console.log('Thumbnail regenerated successfully:', thumbnailPath);
+              resolve();
+            })
+            .on('error', (err, stdout, stderr) => {
+              console.error('Thumbnail regeneration failed:', err.message);
+              console.error('FFmpeg stdout:', stdout);
+              console.error('FFmpeg stderr:', stderr);
+              reject(new Error(`Thumbnail regeneration failed: ${err.message}`));
+            });
+        });
+
+        if (!fs.existsSync(thumbnailPath)) {
+          throw new Error('Regenerated thumbnail file not created');
+        }
+
+        // Update the video document with the new thumbnail path
+        await Video.findByIdAndUpdate(req.params.id, { thumbnail: thumbnailPath });
+      } catch (err) {
+        console.warn('Thumbnail regeneration failed:', err.message);
+        // Fallback to default thumbnail
+        thumbnailPath = path.join(__dirname, '..', 'Uploads', 'thumbnails', 'default-thumbnail.jpg');
+        if (!fs.existsSync(thumbnailPath)) {
+          console.warn('Default thumbnail not found');
+          return res.status(404).json({ success: false, message: 'Thumbnail not available' });
+        }
+      }
     }
 
     res.sendFile(thumbnailPath);
   } catch (error) {
-    console.error('Thumbnail error:', error);
+    console.error('Thumbnail fetch error:', error);
     res.status(500).json({
       success: false,
       message: 'Error fetching thumbnail',
