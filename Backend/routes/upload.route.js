@@ -138,7 +138,8 @@ const calculateFileHash = (filePath) => {
 };
 
 // Upload video files
-router.post('/video', videoUpload.single('video'), async (req, res) => {
+router.post('/', videoUpload.single('video'), async (req, res) => {
+
   try {
     if (!req.file) {
       return res.status(400).json({
