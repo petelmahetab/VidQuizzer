@@ -21,9 +21,11 @@ console.log('ASSEMBLYAI_API_KEY:', process.env.ASSEMBLYAI_API_KEY ? 'Loaded' : '
 connectDB();
 
 // Import routes
-import videoRoutes from './routes/video.routes.js';
+// import videoRoutes from './routes/video.routes.js';
 // import aiRoutes from './routes/ai.routes.js';
-import uploadRoutes from './routes/upload.route.js';
+import mediaRoutes from './routes/media.routes.js';
+
+// import uploadRoutes from './routes/upload.route.js';
 import authRoutes from './routes/auth.routes.js';
 // import questionRoutes from './routes/question.routes.js';
 // import summaryRoutes from './routes/summary.routes.js';
@@ -81,9 +83,9 @@ app.get('/api', (req, res) => {
 });
 
 // API routes
-app.use('/api/videos', videoRoutes);
+// app.use('/api/videos', videoRoutes);
 // app.use('/api/ai', aiRoutes);
-app.use('/api/upload', uploadRoutes);
+app.use('/api/upload', mediaRoutes);
 app.use('/api/auth', authRoutes);
 // app.use('/api/questions', questionRoutes);
 // app.use('/api/ai', summaryRoutes);
