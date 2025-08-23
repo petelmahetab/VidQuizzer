@@ -212,113 +212,126 @@ router.post('/videos', authenticateToken, checkVideoLimit, videoUpload.single('v
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
 
-    if (!req.file) return res.status(400).json({ success: false, message: 'No video file provided' });
-
-    let { title = 'Untitled Video', description = '', isPublic = false, tags = [] } = req.body;
-    if (typeof tags === 'string') {
-      try { tags = JSON.parse(tags); } catch (e) { tags = []; }
-    } else if (!Array.isArray(tags)) { tags = []; }
-
-    const filePath = path.normalize(req.file.path);
-    if (!fs.existsSync(filePath)) return res.status(400).json({ success: false, message: 'Uploaded file not found' });
-
-    const thumbnailDir = path.resolve(__dirname, '..', 'Uploads', 'thumbnails');
-    const thumbnailPath = path.join(thumbnailDir, `thumbnail-${req.file.filename}.jpg`);
-    try {
-      await new Promise((resolve, reject) => {
-        ffmpeg(filePath)
-          .screenshots({ count: 1, folder: thumbnailDir, filename: path.basename(thumbnailPath), size: '320x240', timemarks: ['5'] })
-          .on('end', resolve)
-          .on('error', (err) => reject(new Error(`Thumbnail generation failed: ${err.message}`)));
-      });
-    } catch (err) {
-      console.warn('Thumbnail generation failed:', err.message);
-      const defaultThumbnail = path.join(__dirname, '..', 'Uploads', 'thumbnails', 'default-thumbnail.jpg');
-      thumbnailPath = fs.existsSync(defaultThumbnail) ? defaultThumbnail : null;
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ success: false, message: 'No video files provided' });
     }
 
-    const metadata = await new Promise((resolve, reject) => {
-      ffmpeg.ffprobe(filePath, (err, data) => (err ? reject(err) : resolve(data)));
-    });
+    const uploadResults = [];
+    for (const file of req.files) {
+      let { title = 'Untitled Video', description = '', isPublic = false, tags = [] } = req.body;
+      if (typeof tags === 'string') {
+        try { tags = JSON.parse(tags); } catch (e) { tags = []; }
+      } else if (!Array.isArray(tags)) { tags = []; }
 
-    const fileHash = await calculateFileHash(filePath);
-
-    const newVideo = new Video({
-      user: req.user._id,
-      title,
-      description,
-      filePath,
-      fileSize: req.file.size,
-      thumbnail: thumbnailPath,
-      isPublic,
-      tags,
-      duration: metadata.format.duration || 0,
-      metadata: {
-        format: metadata.format.format_name,
-        codec: metadata.streams.find(s => s.codec_type === 'video')?.codec_name,
-        bitrate: metadata.format.bit_rate,
-        resolution: `${metadata.streams[0]?.width}x${metadata.streams[0]?.height}`,
-        fps: eval(metadata.streams[0]?.r_frame_rate),
-        uploadedAt: new Date(),
-      },
-      status: 'uploading',
-    });
-
-    await newVideo.save();
-    await User.findByIdAndUpdate(req.user._id, { $inc: { 'usage.videosProcessed': 1 } });
-
-    (async () => {
-      try {
-        const transcription = await transcriptionService.transcribeVideo(filePath);
-        await Video.findByIdAndUpdate(newVideo._id, {
-          status: 'processing',
-          processingStage: 'summarization',
-          transcript: { text: transcription.text, timestamped: transcription.timestamped, language: transcription.language },
-        });
-
-        const summary = await AIService.generateSummary(transcription.text);
-        await Video.findByIdAndUpdate(newVideo._id, {
-          status: 'completed',
-          processingStage: 'completed',
-          summary: { text: summary.content, generatedAt: summary.generatedAt, model: 'gemini' },
-        });
-      } catch (error) {
-        const errorMessage = error.message.includes('no spoken audio') || error.message.includes('no valid audio content')
-          ? 'No audible content detected in the video'
-          : error.message;
-        await Video.findByIdAndUpdate(newVideo._id, {
-          status: 'failed',
-          processingStage: 'failed',
-          error: errorMessage,
-        });
+      const filePath = path.normalize(file.path);
+      if (!fs.existsSync(filePath)) {
+        return res.status(400).json({ success: false, message: `Uploaded file ${file.originalname} not found` });
       }
-    })();
 
-    res.status(201).json({
-      success: true,
-      message: 'Video uploaded successfully',
-      data: {
+      const thumbnailDir = path.resolve(__dirname, '..', 'Uploads', 'thumbnails');
+      const thumbnailPath = path.join(thumbnailDir, `thumbnail-${file.filename}.jpg`);
+      try {
+        await new Promise((resolve, reject) => {
+          ffmpeg(filePath)
+            .screenshots({ count: 1, folder: thumbnailDir, filename: path.basename(thumbnailPath), size: '320x240', timemarks: ['5'] })
+            .on('end', resolve)
+            .on('error', (err) => reject(new Error(`Thumbnail generation failed for ${file.originalname}: ${err.message}`)));
+        });
+      } catch (err) {
+        console.warn('Thumbnail generation failed:', err.message);
+        const defaultThumbnail = path.join(__dirname, '..', 'Uploads', 'thumbnails', 'default-thumbnail.jpg');
+        thumbnailPath = fs.existsSync(defaultThumbnail) ? defaultThumbnail : null;
+      }
+
+      const metadata = await new Promise((resolve, reject) => {
+        ffmpeg.ffprobe(filePath, (err, data) => (err ? reject(err) : resolve(data)));
+      });
+
+      const fileHash = await calculateFileHash(filePath);
+
+      const newVideo = new Video({
+        user: req.user._id,
+        title,
+        description,
+        filePath,
+        fileSize: file.size,
+        thumbnail: thumbnailPath,
+        isPublic,
+        tags,
+        duration: metadata.format.duration || 0,
+        metadata: {
+          format: metadata.format.format_name,
+          codec: metadata.streams.find(s => s.codec_type === 'video')?.codec_name,
+          bitrate: metadata.format.bit_rate,
+          resolution: `${metadata.streams[0]?.width}x${metadata.streams[0]?.height}`,
+          fps: eval(metadata.streams[0]?.r_frame_rate),
+          uploadedAt: new Date(),
+        },
+        status: 'uploading',
+      });
+
+      await newVideo.save();
+      await User.findByIdAndUpdate(req.user._id, { $inc: { 'usage.videosProcessed': 1 } });
+
+      (async () => {
+        try {
+          const transcription = await transcriptionService.transcribeVideo(filePath);
+          await Video.findByIdAndUpdate(newVideo._id, {
+            status: 'processing',
+            processingStage: 'summarization',
+            transcript: { text: transcription.text, timestamped: transcription.timestamped, language: transcription.language },
+          });
+
+          const summary = await AIService.generateSummary(transcription.text);
+          await Video.findByIdAndUpdate(newVideo._id, {
+            status: 'completed',
+            processingStage: 'completed',
+            summary: { text: summary.content, generatedAt: summary.generatedAt, model: 'gemini' },
+          });
+        } catch (error) {
+          const errorMessage = error.message.includes('no spoken audio') || error.message.includes('no valid audio content')
+            ? 'No audible content detected in the video'
+            : error.message;
+          await Video.findByIdAndUpdate(newVideo._id, {
+            status: 'failed',
+            processingStage: 'failed',
+            error: errorMessage,
+          });
+        }
+      })();
+
+      uploadResults.push({
         id: newVideo._id,
-        originalName: req.file.originalname,
-        filename: req.file.filename,
-        mimetype: req.file.mimetype,
-        size: req.file.size,
+        originalName: file.originalname,
+        filename: file.filename,
+        mimetype: file.mimetype,
+        size: file.size,
         path: filePath,
         hash: fileHash,
         uploadDate: newVideo.createdAt,
         type: 'video',
         metadata: {
-          extension: path.extname(req.file.originalname),
-          sizeFormatted: formatFileSize(req.file.size),
+          extension: path.extname(file.originalname),
+          sizeFormatted: formatFileSize(file.size),
           duration: newVideo.duration,
           resolution: newVideo.metadata.resolution,
         },
-      },
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      message: `Successfully uploaded ${uploadResults.length} video(s)`,
+      data: uploadResults,
     });
   } catch (error) {
     console.error('Upload error:', error);
-    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-    res.status(500).json({ success: false, message: 'Error uploading video', error: error.message });
+    if (req.files) {
+      req.files.forEach(file => {
+        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+      });
+    }
+    res.status(500).json({ success: false, message: 'Error uploading videos', error: error.message });
   }
 });
 
@@ -517,6 +530,11 @@ router.post('/images', authenticateToken, imageUpload.single('image'), validateM
       ffmpeg.ffprobe(filePath, (err, data) => (err ? reject(err) : resolve(data)));
     });
 
+    // Validate image file
+    if (!metadata.streams.some(s => s.codec_type === 'video') && !metadata.streams.some(s => s.codec_type === 'image')) {
+      throw new Error('Invalid image file');
+    }
+
     const newImage = new Image({
       user: req.user._id,
       title,
@@ -526,10 +544,14 @@ router.post('/images', authenticateToken, imageUpload.single('image'), validateM
       isPublic,
       tags,
       metadata: {
+        extension: path.extname(req.file.originalname),
         format: metadata.format.format_name,
         resolution: `${metadata.streams[0]?.width}x${metadata.streams[0]?.height}`,
+        sizeFormatted: formatFileSize(req.file.size),
         uploadedAt: new Date(),
       },
+      status: 'completed', // Set initial status to completed
+      processingStage: 'completed', // Set initial processingStage to completed
     });
 
     await newImage.save();
@@ -548,19 +570,18 @@ router.post('/images', authenticateToken, imageUpload.single('image'), validateM
         hash: fileHash,
         uploadDate: newImage.createdAt,
         type: 'image',
-        metadata: {
-          extension: path.extname(req.file.originalname),
-          sizeFormatted: formatFileSize(req.file.size),
-          resolution: newImage.metadata.resolution,
-        },
+        metadata: newImage.metadata,
+        status: newImage.status,
+        processingStage: newImage.processingStage,
       },
     });
   } catch (error) {
     console.error('Image upload error:', error);
-    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    if (req.file && fs.existsSync(req.file.path)) await fs.promises.unlink(req.file.path).catch(console.error);
     res.status(500).json({ success: false, message: 'Error uploading image', error: error.message });
   }
 });
+
 
 router.get('/images/:id', authenticateToken, validateId, async (req, res) => {
   try {
@@ -577,8 +598,28 @@ router.get('/images/:id', authenticateToken, validateId, async (req, res) => {
   }
 });
 
+router.get('/images/:id/file', authenticateToken, validateId, async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
+
+    const image = await Image.findOne({ _id: req.params.id, user: req.user._id }).lean();
+    if (!image) return res.status(404).json({ success: false, message: 'Image not found' });
+    if (!image.filePath || !fs.existsSync(image.filePath)) {
+      return res.status(404).json({ success: false, message: 'Image file not found' });
+    }
+
+    res.setHeader('Content-Type', 'image/jpeg'); 
+    res.sendFile(image.filePath);
+  } catch (error) {
+    console.error('Error serving image file:', error);
+    res.status(500).json({ success: false, message: 'Error serving image file', error: error.message });
+  }
+});
+
 // Document Routes
 router.post('/documents', authenticateToken, documentUpload.single('document'), validateMedia, async (req, res) => {
+  console.log('Request body:', req.body, 'Request file:', req.file); // Debug log
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
@@ -604,9 +645,12 @@ router.post('/documents', authenticateToken, documentUpload.single('document'), 
       isPublic,
       tags,
       metadata: {
-        format: req.file.mimetype.split('/')[1],
+        extension: path.extname(req.file.originalname),
+        sizeFormatted: formatFileSize(req.file.size),
         uploadedAt: new Date(),
       },
+      status: 'completed',
+      processingStage: 'completed',
     });
 
     await newDocument.save();
@@ -625,19 +669,35 @@ router.post('/documents', authenticateToken, documentUpload.single('document'), 
         hash: fileHash,
         uploadDate: newDocument.createdAt,
         type: 'document',
-        metadata: {
-          extension: path.extname(req.file.originalname),
-          sizeFormatted: formatFileSize(req.file.size),
-        },
+        metadata: newDocument.metadata,
+        status: newDocument.status,
+        processingStage: newDocument.processingStage,
       },
     });
   } catch (error) {
     console.error('Document upload error:', error);
-    if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+    if (req.file && fs.existsSync(req.file.path)) await fs.promises.unlink(req.file.path).catch(console.error);
     res.status(500).json({ success: false, message: 'Error uploading document', error: error.message });
   }
 });
+router.get('/documents/:id/file', authenticateToken, validateId, async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
 
+    const document = await Document.findOne({ _id: req.params.id, user: req.user._id }).lean();
+    if (!document) return res.status(404).json({ success: false, message: 'Document not found' });
+    if (!document.filePath || !fs.existsSync(document.filePath)) {
+      return res.status(404).json({ success: false, message: 'Document file not found' });
+    }
+
+    res.setHeader('Content-Type', document.mimetype || 'application/pdf');
+    res.sendFile(document.filePath);
+  } catch (error) {
+    console.error('Error serving document file:', error);
+    res.status(500).json({ success: false, message: 'Error serving document file', error: error.message });
+  }
+});
 router.get('/documents/:id', authenticateToken, validateId, async (req, res) => {
   try {
     const errors = validationResult(req);
