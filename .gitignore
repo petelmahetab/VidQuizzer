@@ -1,0 +1,28 @@
+# Ignore uploaded videos and media
+*.mp4
+*.mkv
+*.avi
+*.mov
+*.flv
+*.wmv
+
+# Ignore executables and archives
+*.exe
+*.zip
+*.rar
+*.7z
+
+# Ignore documents
+*.pdf
+*.docx
+*.pptx
+
+# Ignore uploads folder
+Backend/uploads/
+
+# Ignore node_modules
+node_modules/
+
+# Ignore build/dist folders
+dist/
+build/
