@@ -27,6 +27,7 @@
     "helmet": "^8.1.0",
     "joi": "^17.13.3",
     "jsonwebtoken": "^9.0.2",
+    "mammoth": "^1.10.0",
     "mongoose": "^8.16.3",
     "morgan": "^1.10.0",
     "multer": "^2.0.1",
@@ -35,6 +36,7 @@
     "path-to-regexp": "^8.2.0",
     "pdf-parse": "^1.1.1",
     "tesseract.js": "^6.0.1",
+    "textract": "^2.5.0",
     "ytdl-core": "^4.11.5"
   }
 }

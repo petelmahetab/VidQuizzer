@@ -68,6 +68,13 @@ const documentSchema = new mongoose.Schema({
     type: Date,
     default: Date.now,
   },
+}, {
+  timestamps: true,
 });
+
+// Add indexes for better query performance
+documentSchema.index({ user: 1, createdAt: -1 });
+documentSchema.index({ status: 1 });
+documentSchema.index({ 'textContent.text': 'text', title: 'text', description: 'text' });
 
 export default mongoose.model('Document', documentSchema);

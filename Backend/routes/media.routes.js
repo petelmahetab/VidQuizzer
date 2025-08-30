@@ -770,4 +770,15 @@ router.get('/documents/:id', authenticateToken, validateId, async (req, res) => 
 //   }
 // });
 
+router.get('/documents', authenticateToken, async (req, res) => {
+  try {
+    const documents = await Document.find({ user: req.user._id }).lean();
+    res.json({ success: true, data: documents });
+  } catch (error) {
+    console.error('Error fetching documents:', error);
+    res.status(500).json({ success: false, message: 'Error fetching documents', error: error.message });
+  }
+});
+
+
 export default router;
