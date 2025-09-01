@@ -5,6 +5,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import crypto from 'crypto';
 import { body, param, query, validationResult } from 'express-validator';
+import cloudinary from 'cloudinary';
 import Video from '../models/Video.js';
 import Image from '../models/Image.js';
 import Document from '../models/Document.js';
@@ -23,6 +24,19 @@ try {
   console.warn('Failed to set ffmpeg-installer path, falling back to system ffmpeg:', error.message);
   ffmpeg.setFfmpegPath('ffmpeg');
 }
+
+// Configure Cloudinary
+cloudinary.v2.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+// console.log('Loaded Config:', {
+//   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+//   api_key: process.env.CLOUDINARY_API_KEY,
+//   api_secret: process.env.CLOUDINARY_API_SECRET,
+// });
 
 const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
@@ -525,33 +539,58 @@ router.post('/images', authenticateToken, imageUpload.single('image'), validateM
     const filePath = path.normalize(req.file.path);
     if (!fs.existsSync(filePath)) return res.status(400).json({ success: false, message: 'Uploaded file not found' });
 
-    const fileHash = await calculateFileHash(filePath);
+    // Upload to Cloudinary
+    const uploadResult = await cloudinary.v2.uploader.upload(filePath, {
+      resource_type: 'image',
+      folder: 'images',
+    });
+
+    // Delete local file
+    if (fs.existsSync(filePath)) await fs.promises.unlink(filePath).catch(console.error);
+
+    const fileHash = await calculateFileHash(filePath).catch(() => null); // Optional hash
     const metadata = await new Promise((resolve, reject) => {
-      ffmpeg.ffprobe(filePath, (err, data) => (err ? reject(err) : resolve(data)));
+      ffmpeg.ffprobe(filePath, (err, data) => {
+        if (err) {
+          console.error('FFmpeg Error:', err.message, err.stack);
+          reject(err);
+        } else {
+          console.log('FFmpeg Metadata:', JSON.stringify(data, null, 2));
+          resolve(data);
+        }
+      });
+    }).catch((err) => {
+      console.error('FFmpeg Catch Error:', err.message, err.stack);
+      return {
+        format: { format_name: path.extname(req.file.originalname).slice(1) },
+        streams: [{ codec_type: 'image', width: null, height: null }],
+      };
     });
 
     // Validate image file
-    if (!metadata.streams.some(s => s.codec_type === 'video') && !metadata.streams.some(s => s.codec_type === 'image')) {
-      throw new Error('Invalid image file');
+    if (!metadata.streams.some(s => s.codec_type === 'image')) {
+      await cloudinary.v2.uploader.destroy(uploadResult.public_id, { resource_type: 'image' });
+      throw new Error('Invalid image file: No image stream detected');
     }
 
     const newImage = new Image({
       user: req.user._id,
       title,
       description,
-      filePath,
+      cloudinaryUrl: uploadResult.secure_url,
+      publicId: uploadResult.public_id,
       fileSize: req.file.size,
       isPublic,
       tags,
       metadata: {
         extension: path.extname(req.file.originalname),
         format: metadata.format.format_name,
-        resolution: `${metadata.streams[0]?.width}x${metadata.streams[0]?.height}`,
+        resolution: metadata.streams[0]?.width ? `${metadata.streams[0].width}x${metadata.streams[0].height}` : 'unknown',
         sizeFormatted: formatFileSize(req.file.size),
         uploadedAt: new Date(),
       },
-      status: 'completed', // Set initial status to completed
-      processingStage: 'completed', // Set initial processingStage to completed
+      status: 'completed',
+      processingStage: 'completed',
     });
 
     await newImage.save();
@@ -566,7 +605,8 @@ router.post('/images', authenticateToken, imageUpload.single('image'), validateM
         filename: req.file.filename,
         mimetype: req.file.mimetype,
         size: req.file.size,
-        path: filePath,
+        cloudinaryUrl: newImage.cloudinaryUrl,
+        publicId: newImage.publicId,
         hash: fileHash,
         uploadDate: newImage.createdAt,
         type: 'image',
@@ -581,7 +621,6 @@ router.post('/images', authenticateToken, imageUpload.single('image'), validateM
     res.status(500).json({ success: false, message: 'Error uploading image', error: error.message });
   }
 });
-
 
 router.get('/images/:id', authenticateToken, validateId, async (req, res) => {
   try {
@@ -605,12 +644,9 @@ router.get('/images/:id/file', authenticateToken, validateId, async (req, res) =
 
     const image = await Image.findOne({ _id: req.params.id, user: req.user._id }).lean();
     if (!image) return res.status(404).json({ success: false, message: 'Image not found' });
-    if (!image.filePath || !fs.existsSync(image.filePath)) {
-      return res.status(404).json({ success: false, message: 'Image file not found' });
-    }
+    if (!image.cloudinaryUrl) return res.status(404).json({ success: false, message: 'Image file not found' });
 
-    res.setHeader('Content-Type', 'image/jpeg'); 
-    res.sendFile(image.filePath);
+    res.redirect(image.cloudinaryUrl);
   } catch (error) {
     console.error('Error serving image file:', error);
     res.status(500).json({ success: false, message: 'Error serving image file', error: error.message });
@@ -619,7 +655,6 @@ router.get('/images/:id/file', authenticateToken, validateId, async (req, res) =
 
 // Document Routes
 router.post('/documents', authenticateToken, documentUpload.single('document'), validateMedia, async (req, res) => {
-  console.log('Request body:', req.body, 'Request file:', req.file); // Debug log
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
@@ -634,18 +669,29 @@ router.post('/documents', authenticateToken, documentUpload.single('document'), 
     const filePath = path.normalize(req.file.path);
     if (!fs.existsSync(filePath)) return res.status(400).json({ success: false, message: 'Uploaded file not found' });
 
-    const fileHash = await calculateFileHash(filePath);
+    // Upload to Cloudinary
+    const uploadResult = await cloudinary.v2.uploader.upload(filePath, {
+      resource_type: 'raw',
+      folder: 'documents',
+    });
+
+    // Delete local file
+    if (fs.existsSync(filePath)) await fs.promises.unlink(filePath).catch(console.error);
+
+    const fileHash = await calculateFileHash(filePath).catch(() => null); // Optional hash
 
     const newDocument = new Document({
       user: req.user._id,
       title,
       description,
-      filePath,
+      cloudinaryUrl: uploadResult.secure_url,
+      publicId: uploadResult.public_id,
       fileSize: req.file.size,
       isPublic,
       tags,
       metadata: {
         extension: path.extname(req.file.originalname),
+        format: req.file.mimetype.split('/')[1],
         sizeFormatted: formatFileSize(req.file.size),
         uploadedAt: new Date(),
       },
@@ -665,7 +711,8 @@ router.post('/documents', authenticateToken, documentUpload.single('document'), 
         filename: req.file.filename,
         mimetype: req.file.mimetype,
         size: req.file.size,
-        path: filePath,
+        cloudinaryUrl: newDocument.cloudinaryUrl,
+        publicId: newDocument.publicId,
         hash: fileHash,
         uploadDate: newDocument.createdAt,
         type: 'document',
@@ -680,24 +727,7 @@ router.post('/documents', authenticateToken, documentUpload.single('document'), 
     res.status(500).json({ success: false, message: 'Error uploading document', error: error.message });
   }
 });
-router.get('/documents/:id/file', authenticateToken, validateId, async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
 
-    const document = await Document.findOne({ _id: req.params.id, user: req.user._id }).lean();
-    if (!document) return res.status(404).json({ success: false, message: 'Document not found' });
-    if (!document.filePath || !fs.existsSync(document.filePath)) {
-      return res.status(404).json({ success: false, message: 'Document file not found' });
-    }
-
-    res.setHeader('Content-Type', document.mimetype || 'application/pdf');
-    res.sendFile(document.filePath);
-  } catch (error) {
-    console.error('Error serving document file:', error);
-    res.status(500).json({ success: false, message: 'Error serving document file', error: error.message });
-  }
-});
 router.get('/documents/:id', authenticateToken, validateId, async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -712,63 +742,22 @@ router.get('/documents/:id', authenticateToken, validateId, async (req, res) => 
     res.status(500).json({ success: false, message: 'Error fetching document', error: error.message });
   }
 });
-// router.post('/documents/:id/summary', authenticateToken, validateId, async (req, res) => {
-//   try {
-//     const errors = validationResult(req);
-//     if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
 
-//     const document = await Document.findOne({ _id: req.params.id, user: req.user._id }).lean();
-//     if (!document) return res.status(404).json({ success: false, message: 'Document not found' });
-//     if (!document.filePath || !fs.existsSync(document.filePath)) {
-//       return res.status(404).json({ success: false, message: 'Document file not found' });
-//     }
+router.get('/documents/:id/file', authenticateToken, validateId, async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
 
-//     let textContent = '';
-//     const ext = path.extname(document.filePath).toLowerCase();
+    const document = await Document.findOne({ _id: req.params.id, user: req.user._id }).lean();
+    if (!document) return res.status(404).json({ success: false, message: 'Document not found' });
+    if (!document.cloudinaryUrl) return res.status(404).json({ success: false, message: 'Document file not found' });
 
-//     if (ext === '.pdf') {
-//       const dataBuffer = await fs.readFile(document.filePath);
-//       const data = await pdfParse(dataBuffer);
-//       textContent = data.text;
-//     } else if (ext.match(/\.(jpg|jpeg|png)$/)) {
-//       const { createWorker, recognize } = require('tesseract.js');
-//       const worker = await createWorker({
-//         logger: m => console.log(m),
-//         corePath: 'C:\\Program Files\\Tesseract-OCR\\tesseract.exe', // Adjust path if needed
-//       });
-//       const result = await new Promise((resolve, reject) => {
-//         recognize(document.filePath, { lang: 'eng' }, worker)
-//           .then(({ data: { text } }) => resolve(text))
-//           .catch(reject)
-//           .finally(() => worker.terminate());
-//       });
-//       textContent = result;
-//     } else {
-//       return res.status(400).json({ success: false, message: 'Unsupported document format for summarization' });
-//     }
-
-//     console.log('File extension:', ext, 'Extracted text:', textContent); // Debug log
-//     if (!textContent.trim()) {
-//       return res.status(400).json({ success: false, message: 'No extractable text found in document' });
-//     }
-
-//     let summary = document.summary ? document.summary.text : await AIService.generateSummary(textContent);
-//     if (!document.summary) {
-//       await Document.findByIdAndUpdate(document._id, {
-//         summary: { text: summary, generatedAt: new Date(), model: 'gemini' },
-//       });
-//     }
-
-//     res.status(200).json({
-//       success: true,
-//       message: 'Summary retrieved/generated successfully',
-//       data: { documentId: document._id, summary: summary },
-//     });
-//   } catch (error) {
-//     console.error('Summary generation error:', error);
-//     res.status(500).json({ success: false, message: 'Error generating summary', error: error.message });
-//   }
-// });
+    res.redirect(document.cloudinaryUrl);
+  } catch (error) {
+    console.error('Error serving document file:', error);
+    res.status(500).json({ success: false, message: 'Error serving document file', error: error.message });
+  }
+});
 
 router.get('/documents', authenticateToken, async (req, res) => {
   try {
@@ -779,6 +768,5 @@ router.get('/documents', authenticateToken, async (req, res) => {
     res.status(500).json({ success: false, message: 'Error fetching documents', error: error.message });
   }
 });
-
 
 export default router;

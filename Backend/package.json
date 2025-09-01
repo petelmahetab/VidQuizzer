@@ -16,6 +16,7 @@
     "@google/generative-ai": "^0.24.1",
     "axios": "^1.10.0",
     "bcryptjs": "^3.0.2",
+    "cloudinary": "^2.7.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.1",
     "execa": "^9.6.0",
@@ -36,7 +37,7 @@
     "path-to-regexp": "^8.2.0",
     "pdf-parse": "^1.1.1",
     "tesseract.js": "^6.0.1",
-    "textract": "^2.5.0",
+    "textract": "^0.20.0",
     "ytdl-core": "^4.11.5"
   }
 }

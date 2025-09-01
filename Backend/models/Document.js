@@ -18,7 +18,11 @@ const documentSchema = new mongoose.Schema({
     trim: true,
     maxlength: 500,
   },
-  filePath: {
+  cloudinaryUrl: {
+    type: String,
+    required: true,
+  },
+  publicId: {
     type: String,
     required: true,
   },
@@ -40,6 +44,7 @@ const documentSchema = new mongoose.Schema({
     format: { type: String },
     sizeFormatted: { type: String },
     pageCount: { type: Number },
+    resourceType: { type: String }, // e.g., 'raw', 'image'
     uploadedAt: { type: Date, default: Date.now },
   },
   status: {
@@ -72,7 +77,6 @@ const documentSchema = new mongoose.Schema({
   timestamps: true,
 });
 
-// Add indexes for better query performance
 documentSchema.index({ user: 1, createdAt: -1 });
 documentSchema.index({ status: 1 });
 documentSchema.index({ 'textContent.text': 'text', title: 'text', description: 'text' });

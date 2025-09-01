@@ -18,7 +18,11 @@ const imageSchema = new mongoose.Schema({
     trim: true,
     maxlength: 500,
   },
-  filePath: {
+  cloudinaryUrl: {
+    type: String,
+    required: true,
+  },
+  publicId: {
     type: String,
     required: true,
   },
@@ -44,26 +48,23 @@ const imageSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['uploading', 'processing', 'completed', 'failed'],
+    enum: ['uploading', 'completed', 'failed'],
     default: 'uploading',
   },
   processingStage: {
     type: String,
-    enum: ['uploading', 'processing', 'completed', 'failed'],
+    enum: ['uploading', 'completed', 'failed'],
     default: 'uploading',
-  },
-  descriptionGenerated: {
-    text: { type: String },
-    generatedAt: { type: Date },
-    model: { type: String },
-  },
-  error: {
-    type: String,
   },
   createdAt: {
     type: Date,
     default: Date.now,
   },
+}, {
+  timestamps: true,
 });
+
+imageSchema.index({ user: 1, createdAt: -1 });
+imageSchema.index({ status: 1 });
 
 export default mongoose.model('Image', imageSchema);
