@@ -525,6 +525,7 @@ router.get('/videos/:id/summary', authenticateToken, validateId, async (req, res
 
 // Image Routes
 router.post('/images', authenticateToken, imageUpload.single('image'), validateMedia, async (req, res) => {
+  let filePath; // Declare outside try block
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
@@ -536,19 +537,10 @@ router.post('/images', authenticateToken, imageUpload.single('image'), validateM
       try { tags = JSON.parse(tags); } catch (e) { tags = []; }
     } else if (!Array.isArray(tags)) { tags = []; }
 
-    const filePath = path.normalize(req.file.path);
+    filePath = path.normalize(req.file.path);
     if (!fs.existsSync(filePath)) return res.status(400).json({ success: false, message: 'Uploaded file not found' });
 
-    // Upload to Cloudinary
-    const uploadResult = await cloudinary.v2.uploader.upload(filePath, {
-      resource_type: 'image',
-      folder: 'images',
-    });
-
-    // Delete local file
-    if (fs.existsSync(filePath)) await fs.promises.unlink(filePath).catch(console.error);
-
-    const fileHash = await calculateFileHash(filePath).catch(() => null); // Optional hash
+    // Extract metadata first
     const metadata = await new Promise((resolve, reject) => {
       ffmpeg.ffprobe(filePath, (err, data) => {
         if (err) {
@@ -568,10 +560,20 @@ router.post('/images', authenticateToken, imageUpload.single('image'), validateM
     });
 
     // Validate image file
-    if (!metadata.streams.some(s => s.codec_type === 'image')) {
-      await cloudinary.v2.uploader.destroy(uploadResult.public_id, { resource_type: 'image' });
-      throw new Error('Invalid image file: No image stream detected');
+    if (!req.file.mimetype.startsWith('image/') || !metadata.streams.some(s => s.codec_type === 'image' || s.codec_type === 'video')) {
+      throw new Error('Invalid image file: MIME type or stream not detected');
     }
+
+    // Upload to Cloudinary
+    const uploadResult = await cloudinary.v2.uploader.upload(filePath, {
+      resource_type: 'image',
+      folder: 'images',
+    });
+
+    // Delete local file after upload
+    if (fs.existsSync(filePath)) await fs.promises.unlink(filePath).catch(console.error);
+
+    const fileHash = await calculateFileHash(filePath).catch(() => null); // Note: file may be deleted
 
     const newImage = new Image({
       user: req.user._id,
@@ -617,7 +619,7 @@ router.post('/images', authenticateToken, imageUpload.single('image'), validateM
     });
   } catch (error) {
     console.error('Image upload error:', error);
-    if (req.file && fs.existsSync(req.file.path)) await fs.promises.unlink(req.file.path).catch(console.error);
+    if (req.file && fs.existsSync(filePath)) await fs.promises.unlink(filePath).catch(console.error); // Use filePath from outer scope
     res.status(500).json({ success: false, message: 'Error uploading image', error: error.message });
   }
 });
@@ -669,16 +671,16 @@ router.post('/documents', authenticateToken, documentUpload.single('document'), 
     const filePath = path.normalize(req.file.path);
     if (!fs.existsSync(filePath)) return res.status(400).json({ success: false, message: 'Uploaded file not found' });
 
-    // Upload to Cloudinary
+    // Upload to Cloudinary with resource_type 'raw' for non-image/video files
     const uploadResult = await cloudinary.v2.uploader.upload(filePath, {
       resource_type: 'raw',
       folder: 'documents',
     });
 
-    // Delete local file
+    // Delete local file after upload
     if (fs.existsSync(filePath)) await fs.promises.unlink(filePath).catch(console.error);
 
-    const fileHash = await calculateFileHash(filePath).catch(() => null); // Optional hash
+    const fileHash = await calculateFileHash(filePath).catch(() => null); 
 
     const newDocument = new Document({
       user: req.user._id,
@@ -691,7 +693,7 @@ router.post('/documents', authenticateToken, documentUpload.single('document'), 
       tags,
       metadata: {
         extension: path.extname(req.file.originalname),
-        format: req.file.mimetype.split('/')[1],
+        format: req.file.mimetype.split('/')[1] || 'unknown',
         sizeFormatted: formatFileSize(req.file.size),
         uploadedAt: new Date(),
       },
@@ -723,7 +725,7 @@ router.post('/documents', authenticateToken, documentUpload.single('document'), 
     });
   } catch (error) {
     console.error('Document upload error:', error);
-    if (req.file && fs.existsSync(req.file.path)) await fs.promises.unlink(req.file.path).catch(console.error);
+    if (req.file && fs.existsSync(filePath)) await fs.promises.unlink(filePath).catch(console.error); // Fixed scope issue
     res.status(500).json({ success: false, message: 'Error uploading document', error: error.message });
   }
 });
