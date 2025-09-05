@@ -1,12 +1,14 @@
 import express from 'express';
 import { body, validationResult } from 'express-validator';
-import Summary from '../models/Summary.js'; 
 import mongoose from 'mongoose';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import Summary from '../models/Summary.js';
+import Video from '../models/Video.js';
+
 const router = express.Router();
 
-// Simulated summary storage (replace with actual database in production)
 const summaryValidation = [
-  body('content').notEmpty().withMessage('Content to summarize is required'),
+  body('content').optional().notEmpty().withMessage('Content to summarize cannot be empty'),
   body('type')
     .isIn(['brief', 'detailed', 'comprehensive', 'bullet_points', 'key_insights'])
     .withMessage('Invalid summary type'),
@@ -27,22 +29,47 @@ router.post('/', summaryValidation, async (req, res) => {
 
     const { content, type, videoId, userId } = req.body;
 
-    // Simulate AI summarization (replace with real AI service, e.g., xAI API)
-    const summaryContent = `Simulated ${type} summary: ${content.slice(0, 200)}...`;
+    // Validate video exists
+    const video = await Video.findById(videoId);
+    if (!video) {
+      return res.status(404).json({
+        success: false,
+        message: 'Video not found',
+      });
+    }
 
+    // Use video transcript if content is not provided
+    const inputContent = content || video.transcript?.text;
+    if (!inputContent) {
+      return res.status(400).json({
+        success: false,
+        message: 'No content or transcript available for summarization',
+      });
+    }
+
+    // Initialize Gemini API
+    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+    // Generate summary
+    const prompt = `Generate a ${type} summary of the following content in English:\n\n${inputContent}`;
+    const result = await model.generateContent(prompt);
+    const summaryContent = result.response.text();
+
+    // Create summary document
     const summary = new Summary({
       video: videoId,
-      user: userId || req.user?._id, // Assuming user from auth middleware
+      user: userId || req.user._id,
       type,
       content: summaryContent,
-      keyPoints: [], // Populate with real AI data
+      keyPoints: [], // Extract from Gemini response if available
       sentiment: { overall: 'neutral', confidence: 0, emotions: [] },
-      topics: [], // Populate with real AI data
+      topics: [], // Extract from Gemini response if available
       wordCount: summaryContent.split(/\s+/).length,
       readingTime: Math.ceil(summaryContent.split(/\s+/).length / 200),
       language: 'en',
-      aiModel: 'gpt-3.5-turbo', // Update based on actual model
-      processingTime: 0, // Update based on AI processing time
+      aiModel: 'gemini-1.5-flash',
+      processingTime: 0,
       quality: { coherence: 0, completeness: 0, accuracy: 0 },
       isShared: false,
       sharedWith: [],
@@ -71,7 +98,7 @@ router.post('/', summaryValidation, async (req, res) => {
 router.get('/', async (req, res) => {
   try {
     console.log('User ID from token:', req.user?._id);
-    const summaries = await Summary.find({ user: req.user?._id }).populate('video');
+    const summaries = await Summary.find({ user: req.user._id }).populate('video');
     console.log('Summaries found:', summaries);
     res.json({
       success: true,
@@ -94,7 +121,7 @@ router.get('/:id', async (req, res) => {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ success: false, message: 'Invalid summary ID' });
     }
-    const summary = await Summary.findOne({ _id: req.params.id, user: req.user?._id }).populate('video');
+    const summary = await Summary.findOne({ _id: req.params.id, user: req.user._id }).populate('video');
     if (!summary) {
       return res.status(404).json({
         success: false,
@@ -123,7 +150,7 @@ router.get('/video/:videoId', async (req, res) => {
     if (!mongoose.Types.ObjectId.isValid(req.params.videoId)) {
       return res.status(400).json({ success: false, message: 'Invalid video ID' });
     }
-    const summary = await Summary.findOne({ video: req.params.videoId, user: req.user?._id }).populate('video');
+    const summary = await Summary.findOne({ video: req.params.videoId, user: req.user._id }).populate('video');
     if (!summary) {
       return res.status(404).json({
         success: false,

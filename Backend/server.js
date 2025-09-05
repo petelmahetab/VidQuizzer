@@ -23,7 +23,7 @@ connectDB();
 
 // Import routes
 
-// import aiRoutes from './routes/ai.routes.js';
+import aiRoutes from './routes/ai.routes.js';
 import mediaRoutes from './routes/media.routes.js';
 
 
@@ -85,7 +85,7 @@ app.get('/api', (req, res) => {
 
 // API routes
 
-// app.use('/api/ai', aiRoutes);
+app.use('/api/ai', aiRoutes);
 app.use('/api/upload', mediaRoutes);
 app.use('/api/auth', authRoutes);
 // app.use('/api/questions', questionRoutes);
