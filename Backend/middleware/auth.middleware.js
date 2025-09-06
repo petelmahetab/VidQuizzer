@@ -5,38 +5,42 @@ import User from '../models/User.js'
 const authenticateToken = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
-    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+    console.log('Auth Header:', authHeader); // Debug
+    const token = authHeader && authHeader.split(' ')[1];
 
+    console.log('Extracted token:', token); // Debug
     if (!token) {
       return res.status(401).json({
         success: false,
-        message: 'Access token required'
+        message: 'Access token required',
       });
     }
 
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    console.log('Decoded token:', decoded); // Debug
     const user = await User.findById(decoded.id).select('-password');
 
+    console.log('Found user:', user?._id); // Debug
     if (!user) {
       return res.status(401).json({
         success: false,
-        message: 'User not found'
+        message: 'User not found',
       });
     }
 
     req.user = user;
     next();
   } catch (error) {
+    console.log('Token verification error:', error); // Debug
     if (error.name === 'TokenExpiredError') {
       return res.status(401).json({
         success: false,
-        message: 'Token expired'
+        message: 'Token expired',
       });
     }
-    
     return res.status(403).json({
       success: false,
-      message: 'Invalid token'
+      message: 'Invalid token',
     });
   }
 };
@@ -97,7 +101,7 @@ const optionalAuth = async (req, res, next) => {
   }
 };
 
- export default  {
+ export   {
   authenticateToken,
   checkVideoLimit,
   requirePremium,

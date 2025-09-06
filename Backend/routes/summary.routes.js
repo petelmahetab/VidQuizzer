@@ -4,8 +4,13 @@ import mongoose from 'mongoose';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import Summary from '../models/Summary.js';
 import Video from '../models/Video.js';
+import { authenticateToken } from '../middleware/auth.middleware.js';
+
 
 const router = express.Router();
+
+// Apply authentication middleware to all routes
+router.use(authenticateToken);
 
 const summaryValidation = [
   body('content').optional().notEmpty().withMessage('Content to summarize cannot be empty'),
@@ -27,7 +32,7 @@ router.post('/', summaryValidation, async (req, res) => {
       });
     }
 
-    const { content, type, videoId, userId } = req.body;
+    const { content, type, videoId } = req.body;
 
     // Validate video exists
     const video = await Video.findById(videoId);
@@ -56,10 +61,10 @@ router.post('/', summaryValidation, async (req, res) => {
     const result = await model.generateContent(prompt);
     const summaryContent = result.response.text();
 
-    // Create summary document
+    // Create summary document - now only use req.user._id since auth middleware is applied
     const summary = new Summary({
       video: videoId,
-      user: userId || req.user._id,
+      user: req.user._id,
       type,
       content: summaryContent,
       keyPoints: [], // Extract from Gemini response if available
@@ -97,7 +102,7 @@ router.post('/', summaryValidation, async (req, res) => {
 // GET / (all summaries for a user)
 router.get('/', async (req, res) => {
   try {
-    console.log('User ID from token:', req.user?._id);
+    console.log('User ID from token:', req.user._id);
     const summaries = await Summary.find({ user: req.user._id }).populate('video');
     console.log('Summaries found:', summaries);
     res.json({
@@ -117,10 +122,11 @@ router.get('/', async (req, res) => {
 // GET /:id (by summary _id)
 router.get('/:id', async (req, res) => {
   try {
-    console.log('Requested summary _id:', req.params.id, 'User ID:', req.user?._id);
+    console.log('Requested summary _id:', req.params.id, 'User ID:', req.user._id);
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ success: false, message: 'Invalid summary ID' });
     }
+    
     const summary = await Summary.findOne({ _id: req.params.id, user: req.user._id }).populate('video');
     if (!summary) {
       return res.status(404).json({
@@ -128,7 +134,6 @@ router.get('/:id', async (req, res) => {
         message: 'Summary not found',
       });
     }
-
     res.json({
       success: true,
       data: summary,
@@ -146,10 +151,11 @@ router.get('/:id', async (req, res) => {
 // GET /video/:videoId (by video ID)
 router.get('/video/:videoId', async (req, res) => {
   try {
-    console.log('Requested video ID:', req.params.videoId, 'User ID:', req.user?._id);
+    console.log('Requested video ID:', req.params.videoId, 'User ID:', req.user._id);
     if (!mongoose.Types.ObjectId.isValid(req.params.videoId)) {
       return res.status(400).json({ success: false, message: 'Invalid video ID' });
     }
+    
     const summary = await Summary.findOne({ video: req.params.videoId, user: req.user._id }).populate('video');
     if (!summary) {
       return res.status(404).json({
@@ -157,7 +163,6 @@ router.get('/video/:videoId', async (req, res) => {
         message: 'Summary not found for this video',
       });
     }
-
     res.json({
       success: true,
       data: summary,
