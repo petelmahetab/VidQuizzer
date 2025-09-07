@@ -1,119 +1,130 @@
-import mongoose from "mongoose";
+import mongoose from 'mongoose';
 
 const questionSchema = new mongoose.Schema({
   video: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Video',
-    required: true
+    required: false, // Made optional
+  },
+  summary: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Summary',
+    required: false, // Optional reference to Summary
   },
   user: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: true
+    required: true,
   },
   question: {
     type: String,
     required: true,
-    trim: true
+    trim: true,
+    maxLength: 500, // Added validation
   },
   type: {
     type: String,
     enum: ['multiple_choice', 'true_false', 'short_answer', 'essay', 'fill_blank'],
-    required: true
+    required: true,
   },
   difficulty: {
     type: String,
     enum: ['easy', 'medium', 'hard'],
-    default: 'medium'
+    default: 'medium',
   },
   options: [{
-    text: String,
+    text: {
+      type: String,
+      required: function() { return this.type === 'multiple_choice' || this.type === 'true_false'; },
+      trim: true,
+    },
     isCorrect: {
       type: Boolean,
-      default: false
-    }
+      default: false,
+    },
   }],
   correctAnswer: {
     type: String,
-    trim: true
+    trim: true,
+    required: function() { return ['short_answer', 'fill_blank'].includes(this.type); },
   },
   explanation: {
     type: String,
-    trim: true
+    trim: true,
   },
   timestamp: {
-    type: Number, // Timestamp in video where answer can be found
-    default: null
+    type: Number, 
+    default: null,
   },
   category: {
     type: String,
     enum: ['comprehension', 'analysis', 'application', 'synthesis', 'evaluation'],
-    default: 'comprehension'
+    default: 'comprehension',
   },
   tags: [{
     type: String,
-    trim: true
+    trim: true,
   }],
   points: {
     type: Number,
-    default: 1
+    default: 1,
   },
   timeLimit: {
-    type: Number, // in seconds
-    default: null
+    type: Number, 
+    default: null,
   },
   aiGenerated: {
     type: Boolean,
-    default: true
+    default: true,
   },
   aiModel: {
     type: String,
-    default: 'gpt-3.5-turbo'
+    default: 'gemini-1.5-flash',
   },
   confidence: {
     type: Number,
     min: 0,
     max: 1,
-    default: 0
+    default: 0,
   },
   statistics: {
     totalAttempts: {
       type: Number,
-      default: 0
+      default: 0,
     },
     correctAttempts: {
       type: Number,
-      default: 0
+      default: 0,
     },
     averageTime: {
       type: Number,
-      default: 0
-    }
+      default: 0,
+    },
   },
   userAnswers: [{
     user: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: 'User'
+      ref: 'User',
     },
     answer: String,
     isCorrect: Boolean,
     timeSpent: Number,
     attemptedAt: {
       type: Date,
-      default: Date.now
-    }
+      default: Date.now,
+    },
   }],
   isActive: {
     type: Boolean,
-    default: true
+    default: true,
   },
   createdBy: {
     type: String,
     enum: ['ai', 'user'],
-    default: 'ai'
-  }
+    default: 'ai',
+  },
 }, {
-  timestamps: true
+  timestamps: true,
 });
 
 // Virtual for success rate
@@ -124,16 +135,16 @@ questionSchema.virtual('successRate').get(function() {
 
 // Method to record user answer
 questionSchema.methods.recordAnswer = function(userId, answer, timeSpent) {
-  const isCorrect = this.type === 'multiple_choice' 
+  const isCorrect = this.type === 'multiple_choice' || this.type === 'true_false'
     ? this.options.find(opt => opt.text === answer)?.isCorrect || false
-    : answer.toLowerCase().trim() === this.correctAnswer.toLowerCase().trim();
+    : answer.toLowerCase().trim() === this.correctAnswer?.toLowerCase().trim();
   
   this.userAnswers.push({
     user: userId,
     answer,
     isCorrect,
     timeSpent,
-    attemptedAt: new Date()
+    attemptedAt: new Date(),
   });
   
   this.statistics.totalAttempts += 1;
@@ -154,4 +165,18 @@ questionSchema.index({ user: 1, createdAt: -1 });
 questionSchema.index({ difficulty: 1 });
 questionSchema.index({ category: 1 });
 
-module.exports = mongoose.model('Question', questionSchema);
+// Validation for multiple-choice questions
+questionSchema.pre('validate', function(next) {
+  if (this.type === 'multiple_choice') {
+    if (!this.options || this.options.length < 2) {
+      return next(new Error('Multiple-choice questions must have at least 2 options'));
+    }
+    const hasCorrectOption = this.options.some(opt => opt.isCorrect);
+    if (!hasCorrectOption) {
+      return next(new Error('Multiple-choice questions must have at least one correct option'));
+    }
+  }
+  next();
+});
+
+export default mongoose.model('Question', questionSchema);

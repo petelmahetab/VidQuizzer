@@ -28,8 +28,9 @@ import mediaRoutes from './routes/media.routes.js';
 
 
 import authRoutes from './routes/auth.routes.js';
-// import questionRoutes from './routes/question.routes.js';
+import questionRoutes from './routes/question.routes.js';
 import summaryRoutes from './routes/summary.routes.js';
+
 console.log('Starting server...');
 // Create Express app
 const app = express();
@@ -88,8 +89,7 @@ app.get('/api', (req, res) => {
 app.use('/api/ai', aiRoutes);
 app.use('/api/upload', mediaRoutes);
 app.use('/api/auth', authRoutes);
-// app.use('/api/questions', questionRoutes);
-
+app.use('/api/questions', questionRoutes);
 app.use('/api/summary', summaryRoutes);
 
 // FIXED: Replace problematic '*' route with specific catch-all routes

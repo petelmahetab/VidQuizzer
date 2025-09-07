@@ -71,6 +71,7 @@ const checkVideoLimit = async (req, res, next) => {
 
 // Check if user has premium access
 const requirePremium = (req, res, next) => {
+  console.log('User plan:', req.user?.plan); // Debug
   if (req.user.plan !== 'premium') {
     return res.status(403).json({
       success: false,
@@ -79,7 +80,6 @@ const requirePremium = (req, res, next) => {
   }
   next();
 };
-
 // Optional authentication (for public routes that can benefit from user context)
 const optionalAuth = async (req, res, next) => {
   try {
@@ -101,7 +101,7 @@ const optionalAuth = async (req, res, next) => {
   }
 };
 
- export   {
+export default {
   authenticateToken,
   checkVideoLimit,
   requirePremium,

@@ -4,13 +4,9 @@ import mongoose from 'mongoose';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import Summary from '../models/Summary.js';
 import Video from '../models/Video.js';
-import { authenticateToken } from '../middleware/auth.middleware.js';
-
+import authMiddleware from '../middleware/auth.middleware.js';
 
 const router = express.Router();
-
-// Apply authentication middleware to all routes
-router.use(authenticateToken);
 
 const summaryValidation = [
   body('content').optional().notEmpty().withMessage('Content to summarize cannot be empty'),
@@ -20,8 +16,8 @@ const summaryValidation = [
   body('videoId').custom((value) => mongoose.Types.ObjectId.isValid(value)).withMessage('Invalid video ID'),
 ];
 
-// POST /summary
-router.post('/', summaryValidation, async (req, res) => {
+// POST /summary (premium required)
+router.post('/', [authMiddleware.authenticateToken, authMiddleware.requirePremium], summaryValidation, async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -56,22 +52,39 @@ router.post('/', summaryValidation, async (req, res) => {
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
     const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
-    // Generate summary
-    const prompt = `Generate a ${type} summary of the following content in English:\n\n${inputContent}`;
+    // Generate summary with structured output
+    const prompt = `
+      Generate a ${type} summary of the following content in English. If the content is not in English, translate it to English first. Provide the summary in plain text, followed by a list of key points (as bullet points) and a list of main topics covered. Use the following format:
+      
+      Summary: [Your summary here]
+      Key Points:
+      - [Point 1]
+      - [Point 2]
+      Topics:
+      - [Topic 1]
+      - [Topic 2]
+      
+      Content: ${inputContent}
+    `;
     const result = await model.generateContent(prompt);
-    const summaryContent = result.response.text();
+    const responseText = result.response.text();
 
-    // Create summary document - now only use req.user._id since auth middleware is applied
+    // Parse response for summary, key points, and topics
+    const [summaryText, keyPointsText, topicsText] = responseText.split(/Key Points:|\nTopics:/).map(str => str.trim());
+    const keyPoints = keyPointsText ? keyPointsText.split('\n- ').slice(1).map(point => point.trim()) : [];
+    const topics = topicsText ? topicsText.split('\n- ').slice(1).map(topic => topic.trim()) : [];
+
+    // Create summary document
     const summary = new Summary({
       video: videoId,
       user: req.user._id,
       type,
-      content: summaryContent,
-      keyPoints: [], // Extract from Gemini response if available
+      content: summaryText.replace('Summary: ', ''),
+      keyPoints,
+      topics,
       sentiment: { overall: 'neutral', confidence: 0, emotions: [] },
-      topics: [], // Extract from Gemini response if available
-      wordCount: summaryContent.split(/\s+/).length,
-      readingTime: Math.ceil(summaryContent.split(/\s+/).length / 200),
+      wordCount: summaryText.split(/\s+/).length,
+      readingTime: Math.ceil(summaryText.split(/\s+/).length / 200),
       language: 'en',
       aiModel: 'gemini-1.5-flash',
       processingTime: 0,
@@ -100,7 +113,7 @@ router.post('/', summaryValidation, async (req, res) => {
 });
 
 // GET / (all summaries for a user)
-router.get('/', async (req, res) => {
+router.get('/', authMiddleware.authenticateToken, async (req, res) => {
   try {
     console.log('User ID from token:', req.user._id);
     const summaries = await Summary.find({ user: req.user._id }).populate('video');
@@ -120,7 +133,7 @@ router.get('/', async (req, res) => {
 });
 
 // GET /:id (by summary _id)
-router.get('/:id', async (req, res) => {
+router.get('/:id', authMiddleware.authenticateToken, async (req, res) => {
   try {
     console.log('Requested summary _id:', req.params.id, 'User ID:', req.user._id);
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -149,29 +162,29 @@ router.get('/:id', async (req, res) => {
 });
 
 // GET /video/:videoId (by video ID)
-router.get('/video/:videoId', async (req, res) => {
+router.get('/video/:videoId', authMiddleware.authenticateToken, async (req, res) => {
   try {
     console.log('Requested video ID:', req.params.videoId, 'User ID:', req.user._id);
     if (!mongoose.Types.ObjectId.isValid(req.params.videoId)) {
       return res.status(400).json({ success: false, message: 'Invalid video ID' });
     }
     
-    const summary = await Summary.findOne({ video: req.params.videoId, user: req.user._id }).populate('video');
-    if (!summary) {
+    const summaries = await Summary.find({ video: req.params.videoId, user: req.user._id }).populate('video');
+    if (!summaries.length) {
       return res.status(404).json({
         success: false,
-        message: 'Summary not found for this video',
+        message: 'No summaries found for this video',
       });
     }
     res.json({
       success: true,
-      data: summary,
+      data: summaries, // Return array of summaries
     });
   } catch (error) {
     console.error('Error in GET /video/:videoId:', error);
     res.status(500).json({
       success: false,
-      message: 'Error retrieving summary',
+      message: 'Error retrieving summaries',
       error: error.message,
     });
   }
