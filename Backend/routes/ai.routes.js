@@ -12,7 +12,7 @@ const __dirname = path.dirname(__filename);
 const upload = multer({
   dest: 'temp/',
   limits: {
-    fileSize: 50 * 1024 * 1024 // 50MB limit
+    fileSize: 500 * 1024 * 1024 // 500MB limit
   }
 });
 
@@ -414,4 +414,4 @@ router.get('/jobs/:videoId', async (req, res) => {
   }
 });
 
-export default router;
+export default router; 
