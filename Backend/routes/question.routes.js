@@ -71,7 +71,7 @@ router.post('/', [authMiddleware.authenticateToken, authMiddleware.requirePremiu
     const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
     // Prepare prompt for AI-generated explanation or options
-    let prompt = `Generate a ${type} question based on the following context. Provide the question, options (if applicable), correct answer, and explanation in English. Format the response as JSON:
+    let prompt = `Generate a ${type} question based on the provided context. Return the response as clean JSON (no markdown, no backticks, no extra text) with the following structure:
     {
       "question": "",
       "options": [{"text": "", "isCorrect": false}],
@@ -79,10 +79,10 @@ router.post('/', [authMiddleware.authenticateToken, authMiddleware.requirePremiu
       "explanation": ""
     }`;
     if (video && video.transcript?.text) {
-      prompt += `\nVideo Transcript: ${video.transcript.text}`;
+      prompt += `\nVideo Transcript: ${video.transcript.text.substring(0, 1000)}`; // Limit transcript length to avoid token limits
     }
     if (summary && summary.content) {
-      prompt += `\nSummary Content: ${summary.content}`;
+      prompt += `\nSummary Content: ${summary.content.substring(0, 500)}`; // Limit summary length
     }
     if (timestamp) {
       prompt += `\nFocus on the video content around timestamp: ${timestamp} seconds`;
@@ -91,7 +91,32 @@ router.post('/', [authMiddleware.authenticateToken, authMiddleware.requirePremiu
     let aiResponse = { question, options: options || [], correctAnswer: correctAnswer || '', explanation: '' };
     if (type === 'multiple_choice' || type === 'true_false' || !correctAnswer) {
       const result = await model.generateContent(prompt);
-      aiResponse = JSON.parse(result.response.text());
+      const rawResponse = result.response.text();
+
+      // Clean the response to remove markdown or backticks
+      let cleanedResponse = rawResponse
+        .replace(/```json\n|```/g, '') // Remove ```json and ```
+        .replace(/^\s+|\s+$/g, '') // Trim whitespace
+        .replace(/\n/g, ''); // Remove newlines
+
+      try {
+        aiResponse = JSON.parse(cleanedResponse);
+      } catch (parseError) {
+        console.error('Error parsing Gemini response:', parseError, 'Raw response:', rawResponse);
+        return res.status(500).json({
+          success: false,
+          message: 'Invalid response format from AI model',
+          error: parseError.message,
+        });
+      }
+
+      // Validate AI response structure
+      if (!aiResponse.question || !aiResponse.correctAnswer || !aiResponse.explanation) {
+        return res.status(500).json({
+          success: false,
+          message: 'AI response missing required fields',
+        });
+      }
     }
 
     // Create question document
