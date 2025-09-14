@@ -3,114 +3,111 @@ import express from 'express';
 import multer from 'multer';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import mongoose from 'mongoose';
+import axios from 'axios';
+import sanitizeHtml from 'sanitize-html';
+import dotenv from 'dotenv';
+import fs from 'fs/promises';
+import models from '../models/index.js';
+
+dotenv.config();
 
 const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Configure multer for temporary file uploads
+// Configure MongoDB
+mongoose.connect(process.env.MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+}).catch(err => console.error('MongoDB connection error:', err));
+
+// Configure Multer
 const upload = multer({
   dest: 'temp/',
-  limits: {
-    fileSize: 500 * 1024 * 1024 // 500MB limit
-  }
+  limits: { fileSize: 500 * 1024 * 1024 }, // 500MB
+  fileFilter: (req, file, cb) => {
+    const filetypes = /mp4|mov|avi|mkv/;
+    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = filetypes.test(file.mimetype);
+    if (extname && mimetype) {
+      return cb(null, true);
+    }
+    cb(new Error('Invalid file type. Only MP4, MOV, AVI, MKV allowed.'));
+  },
 });
+
+// Custom Error Class
+class AppError extends Error {
+  constructor(message, statusCode) {
+    super(message);
+    this.statusCode = statusCode;
+    this.status = `${statusCode}`.startsWith('4') ? 'fail' : 'error';
+    Error.captureStackTrace(this, this.constructor);
+  }
+}
 
 // AI Video Analysis
 router.post('/analyze', upload.single('video'), async (req, res) => {
   try {
     const { analysisType, options } = req.body;
-    
-    if (!req.file) {
-      return res.status(400).json({
-        success: false,
-        message: 'No video file provided for analysis'
-      });
-    }
-    
-    // Mock AI analysis - replace with your AI service integration
-    const mockAnalysis = {
-      id: Date.now(),
-      videoId: req.body.videoId,
-      analysisType: analysisType || 'general',
+    if (!req.file) throw new AppError('No video file provided for analysis', 400);
+
+    const videoId = sanitizeHtml(req.body.videoId);
+    if (!videoId) throw new AppError('Video ID is required', 400);
+
+    const analysis = new models.Analysis({
+      videoId,
+      analysisType: sanitizeHtml(analysisType || 'general'),
       status: 'processing',
+      processedAt: new Date(),
       results: {
-        objects: ['person', 'car', 'building'],
+        objects: ['person', 'car', 'building'], // Mock; replace with real AI service
         emotions: ['happy', 'neutral'],
         scenes: ['outdoor', 'daytime'],
         confidence: 0.89,
         duration: 120,
-        frames: 3600
+        frames: 3600,
       },
-      processedAt: new Date(),
-      processingTime: 45.2
-    };
-    
+      processingTime: 45.2,
+    });
+
+    await analysis.save();
+
+    // Mock AI processing (replace with real AI service)
+    // Cleanup temporary file
+    await fs.unlink(req.file.path).catch(err => console.error('File cleanup error:', err));
+
     res.json({
       success: true,
       message: 'AI analysis initiated',
-      data: mockAnalysis
+      data: analysis,
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
-      message: 'Error processing AI analysis',
-      error: error.message
+      message: error.message || 'Error processing AI analysis',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     });
   }
 });
 
-// Get AI analysis results
+// Get AI Analysis Results
 router.get('/analysis/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    
-    // Mock analysis results - replace with your database logic
-    const mockAnalysis = {
-      id: parseInt(id),
-      videoId: 123,
-      analysisType: 'general',
-      status: 'completed',
-      results: {
-        objects: [
-          { name: 'person', confidence: 0.95, count: 3, timestamps: [1.2, 15.6, 30.8] },
-          { name: 'car', confidence: 0.88, count: 2, timestamps: [5.4, 25.1] },
-          { name: 'building', confidence: 0.92, count: 1, timestamps: [0.0] }
-        ],
-        emotions: [
-          { emotion: 'happy', confidence: 0.87, duration: 45.2 },
-          { emotion: 'neutral', confidence: 0.76, duration: 74.8 }
-        ],
-        scenes: [
-          { scene: 'outdoor', confidence: 0.94, duration: 120 },
-          { scene: 'daytime', confidence: 0.89, duration: 120 }
-        ],
-        summary: {
-          totalObjects: 6,
-          dominantEmotion: 'happy',
-          sceneType: 'outdoor',
-          qualityScore: 8.5,
-          technicalMetrics: {
-            brightness: 0.67,
-            contrast: 0.72,
-            sharpness: 0.85,
-            colorfulness: 0.78
-          }
-        }
-      },
-      processedAt: new Date(),
-      processingTime: 45.2
-    };
-    
+    const analysis = await models.Analysis.findById(id);
+    if (!analysis) throw new AppError('Analysis not found', 404);
+
     res.json({
       success: true,
-      data: mockAnalysis
+      data: analysis,
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
-      message: 'Error fetching analysis results',
-      error: error.message
+      message: error.message || 'Error fetching analysis results',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     });
   }
 });
@@ -119,84 +116,63 @@ router.get('/analysis/:id', async (req, res) => {
 router.post('/enhance', async (req, res) => {
   try {
     const { videoId, enhancementType, settings } = req.body;
-    
-    if (!videoId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Video ID is required'
-      });
-    }
-    
-    // Mock enhancement process - replace with your AI service integration
-    const mockEnhancement = {
-      id: Date.now(),
-      videoId: videoId,
-      enhancementType: enhancementType || 'quality',
+    if (!videoId) throw new AppError('Video ID is required', 400);
+
+    const enhancement = new models.Enhancement({
+      videoId: sanitizeHtml(videoId),
+      enhancementType: sanitizeHtml(enhancementType || 'quality'),
       status: 'processing',
       settings: settings || {
         upscale: true,
         denoise: true,
         sharpen: 0.5,
         brightness: 0.1,
-        contrast: 0.05
+        contrast: 0.05,
       },
-      estimatedTime: 180, // seconds
-      startedAt: new Date()
-    };
-    
-    res.json({
-      success: true,
-      message: 'Video enhancement initiated',
-      data: mockEnhancement
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      message: 'Error initiating video enhancement',
-      error: error.message
-    });
-  }
-});
-
-// Get enhancement status
-router.get('/enhancement/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    
-    // Mock enhancement status - replace with your database logic
-    const mockEnhancement = {
-      id: parseInt(id),
-      videoId: 123,
-      enhancementType: 'quality',
-      status: 'completed',
-      progress: 100,
-      settings: {
-        upscale: true,
-        denoise: true,
-        sharpen: 0.5,
-        brightness: 0.1,
-        contrast: 0.05
-      },
+      startedAt: new Date(),
+      // Mock results; replace with real AI service
       results: {
         originalSize: 15728640,
         enhancedSize: 23592960,
         qualityImprovement: 0.34,
-        outputPath: '/uploads/enhanced/enhanced-video-123.mp4'
+        outputPath: `/uploads/enhanced/enhanced-video-${videoId}.mp4`,
       },
-      startedAt: new Date(Date.now() - 180000),
+      processingTime: 178.5,
       completedAt: new Date(),
-      processingTime: 178.5
-    };
-    
+    });
+
+    await enhancement.save();
+
     res.json({
       success: true,
-      data: mockEnhancement
+      message: 'Video enhancement initiated',
+      data: enhancement,
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
-      message: 'Error fetching enhancement status',
-      error: error.message
+      message: error.message || 'Error initiating video enhancement',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined,
+    });
+  }
+});
+
+// Get Enhancement Status
+router.get('/enhancement/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const enhancement = await models.Enhancement.findById(id);
+    if (!enhancement) throw new AppError('Enhancement not found', 404);
+
+    res.json({
+      success: true,
+      data: enhancement,
+    });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      message: error.message || 'Error fetching enhancement status',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     });
   }
 });
@@ -205,89 +181,62 @@ router.get('/enhancement/:id', async (req, res) => {
 router.post('/transcribe', async (req, res) => {
   try {
     const { videoId, language, includeTimestamps } = req.body;
-    
-    if (!videoId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Video ID is required'
-      });
-    }
-    
-    // Mock transcription process - replace with your AI service integration
-    const mockTranscription = {
-      id: Date.now(),
-      videoId: videoId,
-      language: language || 'en',
+    if (!videoId) throw new AppError('Video ID is required', 400);
+
+    const transcription = new models.Transcription({
+      videoId: sanitizeHtml(videoId),
+      language: sanitizeHtml(language || 'en'),
       includeTimestamps: includeTimestamps || false,
       status: 'processing',
-      estimatedTime: 60,
-      startedAt: new Date()
-    };
-    
+      startedAt: new Date(),
+      // Mock results; replace with real AI service
+      results: {
+        text: "Hello everyone, welcome to this video tutorial. Today we'll be discussing the latest features in our application. Let's start by exploring the main dashboard.",
+        segments: [
+          { start: 0.0, end: 3.2, text: "Hello everyone, welcome to this video tutorial.", confidence: 0.96 },
+          { start: 3.2, end: 7.8, text: "Today we'll be discussing the latest features in our application.", confidence: 0.94 },
+          { start: 7.8, end: 11.5, text: "Let's start by exploring the main dashboard.", confidence: 0.92 },
+        ],
+        wordCount: 23,
+        avgConfidence: 0.94,
+        detectedLanguage: 'en',
+      },
+      processedAt: new Date(),
+      processingTime: 42.1,
+    });
+
+    await transcription.save();
+
     res.json({
       success: true,
       message: 'Video transcription initiated',
-      data: mockTranscription
+      data: transcription,
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
-      message: 'Error initiating video transcription',
-      error: error.message
+      message: error.message || 'Error initiating video transcription',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     });
   }
 });
 
-// Get transcription results
+// Get Transcription Results
 router.get('/transcription/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    
-    // Mock transcription results - replace with your database logic
-    const mockTranscription = {
-      id: parseInt(id),
-      videoId: 123,
-      language: 'en',
-      status: 'completed',
-      results: {
-        text: "Hello everyone, welcome to this video tutorial. Today we'll be discussing the latest features in our application. Let's start by exploring the main dashboard.",
-        segments: [
-          {
-            start: 0.0,
-            end: 3.2,
-            text: "Hello everyone, welcome to this video tutorial.",
-            confidence: 0.96
-          },
-          {
-            start: 3.2,
-            end: 7.8,
-            text: "Today we'll be discussing the latest features in our application.",
-            confidence: 0.94
-          },
-          {
-            start: 7.8,
-            end: 11.5,
-            text: "Let's start by exploring the main dashboard.",
-            confidence: 0.92
-          }
-        ],
-        wordCount: 23,
-        avgConfidence: 0.94,
-        detectedLanguage: 'en'
-      },
-      processedAt: new Date(),
-      processingTime: 42.1
-    };
-    
+    const transcription = await models.Transcription.findById(id);
+    if (!transcription) throw new AppError('Transcription not found', 404);
+
     res.json({
       success: true,
-      data: mockTranscription
+      data: transcription,
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
-      message: 'Error fetching transcription results',
-      error: error.message
+      message: error.message || 'Error fetching transcription results',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     });
   }
 });
@@ -296,122 +245,153 @@ router.get('/transcription/:id', async (req, res) => {
 router.post('/summarize', async (req, res) => {
   try {
     const { videoId, summaryType, maxLength } = req.body;
-    
-    if (!videoId) {
-      return res.status(400).json({
-        success: false,
-        message: 'Video ID is required'
-      });
-    }
-    
-    // Mock summarization process - replace with your AI service integration
-    const mockSummary = {
-      id: Date.now(),
-      videoId: videoId,
-      summaryType: summaryType || 'brief',
+    if (!videoId) throw new AppError('Video ID is required', 400);
+
+    const transcription = await models.Transcription.findOne({ videoId, status: 'completed' });
+    if (!transcription) throw new AppError('Transcription not found for summarization', 400);
+
+    const summary = new models.Summary({
+      videoId: sanitizeHtml(videoId),
+      summaryType: sanitizeHtml(summaryType || 'brief'),
       maxLength: maxLength || 200,
       status: 'processing',
-      estimatedTime: 30,
-      startedAt: new Date()
+      startedAt: new Date(),
+    });
+
+    await summary.save();
+
+    // Call Gemini API
+    const response = await axios.post(
+      'https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent',
+      {
+        contents: [
+          {
+            parts: [
+              {
+                text: `Summarize the following text in a ${summaryType} format, keeping it under ${maxLength} words: ${transcription.results.text}`,
+              },
+            ],
+          },
+        ],
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.GEMINI_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    if (!response.data.candidates || !response.data.candidates[0].content) {
+      throw new AppError('Gemini API failed to return a valid response', 500);
+    }
+
+    const summaryText = response.data.candidates[0].content.parts[0].text;
+    const results = {
+      summary: summaryText,
+      keyPoints: summaryText.split('. ').map(s => s.trim()).filter(s => s),
+      topics: [],
+      sentiment: 'neutral',
+      duration: transcription.results.segments[transcription.results.segments.length - 1].end,
+      wordCount: summaryText.split(' ').length,
     };
-    
+
+    await models.Summary.updateOne(
+      { _id: summary._id },
+      { status: 'completed', results, processingTime: 28.3, processedAt: new Date() }
+    );
+
+    const updatedSummary = await models.Summary.findById(summary._id);
+
     res.json({
       success: true,
       message: 'Video summarization initiated',
-      data: mockSummary
+      data: updatedSummary,
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
-      message: 'Error initiating video summarization',
-      error: error.message
+      message: error.message || 'Error initiating video summarization',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     });
   }
 });
 
-// Get summarization results
+// Get Summarization Results
 router.get('/summary/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    
-    // Mock summary results - replace with your database logic
-    const mockSummary = {
-      id: parseInt(id),
-      videoId: 123,
-      summaryType: 'brief',
-      status: 'completed',
-      results: {
-        summary: "This video tutorial introduces the latest features in the application, focusing on the main dashboard and its new capabilities. The presenter demonstrates key functionalities and provides step-by-step guidance for users.",
-        keyPoints: [
-          "Introduction to latest application features",
-          "Main dashboard exploration",
-          "Step-by-step user guidance",
-          "Key functionality demonstration"
-        ],
-        topics: ['tutorial', 'dashboard', 'features', 'application'],
-        sentiment: 'positive',
-        duration: 120,
-        wordCount: 45
-      },
-      processedAt: new Date(),
-      processingTime: 28.3
-    };
-    
+    const summary = await models.Summary.findById(id);
+    if (!summary) throw new AppError('Summary not found', 404);
+
     res.json({
       success: true,
-      data: mockSummary
+      data: summary,
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
-      message: 'Error fetching summary results',
-      error: error.message
+      message: error.message || 'Error fetching summary results',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     });
   }
 });
 
-// Get all AI processing jobs for a video
+// Get All AI Processing Jobs for a Video
 router.get('/jobs/:videoId', async (req, res) => {
   try {
-    const { videoId } = req.params;
-    
-    // Mock jobs data - replace with your database logic
-    const mockJobs = [
-      {
-        id: 1,
+    const videoId = sanitizeHtml(req.params.videoId);
+    if (!videoId) throw new AppError('Video ID is required', 400);
+
+    const [analyses, enhancements, transcriptions, summaries] = await Promise.all([
+      models.Analysis.find({ videoId }),
+      models.Enhancement.find({ videoId }),
+      models.Transcription.find({ videoId }),
+      models.Summary.find({ videoId }),
+    ]);
+
+    const jobs = [
+      ...analyses.map(a => ({
+        id: a._id,
         type: 'analysis',
-        status: 'completed',
-        createdAt: new Date(Date.now() - 86400000),
-        completedAt: new Date(Date.now() - 86000000)
-      },
-      {
-        id: 2,
+        status: a.status,
+        createdAt: a.processedAt,
+        completedAt: a.processedAt,
+      })),
+      ...enhancements.map(e => ({
+        id: e._id,
         type: 'enhancement',
-        status: 'processing',
-        progress: 65,
-        createdAt: new Date(Date.now() - 3600000),
-        estimatedCompletion: new Date(Date.now() + 1800000)
-      },
-      {
-        id: 3,
+        status: e.status,
+        createdAt: e.startedAt,
+        completedAt: e.completedAt,
+      })),
+      ...transcriptions.map(t => ({
+        id: t._id,
         type: 'transcription',
-        status: 'completed',
-        createdAt: new Date(Date.now() - 7200000),
-        completedAt: new Date(Date.now() - 6800000)
-      }
+        status: t.status,
+        createdAt: t.startedAt,
+        completedAt: t.processedAt,
+      })),
+      ...summaries.map(s => ({
+        id: s._id,
+        type: 'summary',
+        status: s.status,
+        createdAt: s.startedAt,
+        completedAt: s.processedAt,
+      })),
     ];
-    
+
     res.json({
       success: true,
-      data: mockJobs
+      data: jobs,
     });
   } catch (error) {
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
-      message: 'Error fetching AI jobs',
-      error: error.message
+      message: error.message || 'Error fetching AI jobs',
+      error: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     });
   }
 });
 
-export default router; 
+export default router;

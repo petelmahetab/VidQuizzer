@@ -10,6 +10,7 @@ import rateLimit from 'express-rate-limit';
 import mongoose from 'mongoose';
 import connectDB from './config/db.js';
 // 44
+
 // Get __dirname equivalent for ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
