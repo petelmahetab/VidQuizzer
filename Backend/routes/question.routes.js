@@ -3,8 +3,8 @@ import { body, validationResult } from 'express-validator';
 import mongoose from 'mongoose';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import Question from '../models/Question.js';
-import Video from '../models/Video.js';
-import Summary from '../models/Summary.js';
+import models from '../models/Index.js'; 
+const { Video, Summary } = models; 
 import authMiddleware from '../middleware/auth.middleware.js';
 
 const router = express.Router();

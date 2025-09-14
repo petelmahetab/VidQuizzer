@@ -2,7 +2,8 @@ import express from 'express';
 import { body, validationResult } from 'express-validator';
 import mongoose from 'mongoose';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import Summary from '../models/Summary.js';
+import models from '../models/Index.js';
+const { Summary} = models;
 import Video from '../models/Video.js';
 import authMiddleware from '../middleware/auth.middleware.js';
 

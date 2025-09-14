@@ -21,6 +21,7 @@ dotenv.config({ path: path.resolve(__dirname, '.env') });
 console.log('ASSEMBLYAI_API_KEY:', process.env.ASSEMBLYAI_API_KEY ? 'Loaded' : 'Not Loaded');
 // Connect to MongoDB
 connectDB();
+console.log('From Server MONGODB_URI:', process.env.MONGODB_URI);
 
 // Import routes
 

@@ -99,4 +99,7 @@ userSchema.methods.canProcessVideo = function () {
     return this.usage.videosProcessed < this.usage.monthlyLimit;
 };
 
-export default mongoose.model('User', userSchema);
+const User =
+  mongoose.models.User || mongoose.model('User', userSchema);
+
+export default User;

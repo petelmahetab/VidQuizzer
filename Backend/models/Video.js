@@ -130,4 +130,7 @@ videoSchema.methods.incrementViews = async function () {
   return this.save();
 };
 
-export default mongoose.model('Video', videoSchema);
+const Video =
+  mongoose.models.Video || mongoose.model('Video', videoSchema);
+
+export default Video;
