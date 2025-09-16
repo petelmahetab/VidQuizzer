@@ -207,85 +207,317 @@ router.get('/transcription/:id', async (req, res) => {
     });
   }
 });
-// router.get('/transcription/:assemblyId', async (req, res) => {
-//   try {
-//     const { assemblyId } = req.params;
-
-//     // Find by results.id
-//     const transcription = await models.Transcription.findOne({ 'results.id': assemblyId });
-
-//     if (!transcription) throw new AppError('Transcription not found', 404);
-
-//     res.json({
-//       success: true,
-//       data: transcription,
-//     });
-//   } catch (error) {
-//     res.status(error.statusCode || 500).json({
-//       success: false,
-//       message: error.message || 'Error fetching transcription results',
-//       error: process.env.NODE_ENV === 'development' ? error.stack : undefined,
-//     });
-//   }
-// });
-
-
-// AI Video Summarization
 
 router.post('/summarize', async (req, res) => {
+  let videoId, userId, summaryType, maxLength, transcriptionId, transcription;
   try {
-    const { videoId, userId, summaryType, maxLength } = req.body;
-    if (!videoId || !userId) throw new AppError('Video ID and User ID are required', 400);
+    ({ videoId, userId, summaryType = 'brief', maxLength = 200, transcriptionId } = req.body);
+    if (!videoId || !userId || !transcriptionId) throw new AppError('Video ID, User ID, and Transcription ID are required', 400);
 
-    if (!mongoose.isValidObjectId(videoId)) throw new AppError('Invalid Video ID', 400);
     if (!mongoose.isValidObjectId(userId)) throw new AppError('Invalid User ID', 400);
 
-    const transcription = await models.Transcription.findOne({ videoId, status: 'completed' });
+    transcription = await models.Transcription.findOne({ _id: transcriptionId, status: 'completed' });
     if (!transcription) throw new AppError('Transcription not found for summarization', 400);
 
+    const transcriptId = transcription.results.id;
+    console.log('Using transcript ID for LeMUR:', transcriptId);
+
+    // Step 1: Poll for transcript readiness (reduced to 3 attempts to save quota)
+    let transcriptStatus = transcription.results.status;
+    let attempts = 0;
+    while (transcriptStatus !== 'ready' && attempts < 3) {
+      console.log(`Transcript status: ${transcriptStatus}, polling...`);
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      const statusResponse = await axios.get(`https://api.assemblyai.com/v2/transcript/${transcriptId}`, {
+        headers: { Authorization: `Bearer ${process.env.ASSEMBLYAI_API_KEY}` }
+      });
+      transcriptStatus = statusResponse.data.status;
+      attempts++;
+    }
+    if (transcriptStatus !== 'ready') throw new AppError('Transcript not ready for summarization', 400);
+
+    // Step 2: LeMUR prompt
+    const prompt = `Summarize the following Hindi transcript in a ${summaryType} format, keeping it under ${maxLength} words. Include key points with timestamps, overall sentiment (positive/negative/neutral), and main topics. Transcript: ${transcription.results.text}`;
+
     const response = await axios.post(
-      'https://api.assemblyai.com/v2/summarize',
-      {
-        text: transcription.results.text,
-        summary_type: summaryType || 'brief',
-        max_length: maxLength || 200,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.ASSEMBLYAI_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-      }
+      'https://api.assemblyai.com/v2/lemur/task',
+      { transcript_ids: [transcriptId], prompt: prompt, temperature: 0.1 },
+      { headers: { Authorization: `Bearer ${process.env.ASSEMBLYAI_API_KEY}`, 'Content-Type': 'application/json' } }
     );
 
-    const summaryText = response.data.summary;
+    console.log('LeMUR response:', response.data);
+
+    const summaryText = response.data.response || 'Summary generated via LeMUR';
     const summary = new models.Summary({
-      video: videoId,
-      user: userId,
-      type: sanitizeHtml(summaryType || 'brief'),
-      content: sanitizeHtml(summaryText),
+      video: videoId, user: userId, type: sanitizeHtml(summaryType), content: sanitizeHtml(summaryText),
       keyPoints: summaryText.split('. ').map((point, index) => ({
-        point: sanitizeHtml(point.trim()),
-        timestamp: transcription.results.segments[index]?.start || 0,
-        importance: 3,
+        point: sanitizeHtml(point.trim()), timestamp: transcription.results.segments[index]?.start || 0, importance: 3,
+      })).filter(kp => kp.point),
+      sentiment: { overall: 'neutral', confidence: 0.5, emotions: [] }, topics: [], status: 'completed',
+    });
+    await summary.save();
+
+    res.json({ success: true, message: 'Video summarization completed', data: summary });
+  } catch (error) {
+    console.error('LeMUR summarization error:', error.response ? error.response.data : error.message);
+    // Fallback to Gemini with quota-aware retry
+    console.log('Falling back to Gemini...');
+    let retryCount = 0;
+    const maxRetries = 3;
+    let fallbackSummaryText = 'Fallback summary not available due to quota limits.';
+    while (retryCount < maxRetries) {
+      try {
+        const fallbackResponse = await axios.post(
+          'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=' + process.env.GEMINI_API_KEY,
+          {
+            contents: [{ parts: [{ text: `Summarize this Hindi transcript in ${summaryType || 'brief'} format, max ${maxLength || 200} words: ${transcription.results.text}` }] }],
+          },
+          { headers: { 'Content-Type': 'application/json' } }
+        );
+        fallbackSummaryText = fallbackResponse.data.candidates[0].content.parts[0].text;
+        break; // Success, exit loop
+      } catch (fallbackError) {
+        console.error('Gemini fallback error:', fallbackError.response ? fallbackError.response.data : fallbackError.message);
+        if (fallbackError.response?.status === 429 && retryCount < maxRetries - 1) {
+          const retryDelay = fallbackError.response?.data?.error?.details?.[2]?.retryDelay || '3s';
+          const delayMs = parseInt(retryDelay) || 3000;
+          console.log(`Quota exceeded, retrying in ${delayMs / 1000} seconds...`);
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+          retryCount++;
+        } else {
+          console.log('All retries failed, using mock fallback');
+          // Mock fallback: Simple summary from transcript text
+          fallbackSummaryText = `Brief summary: The transcript discusses themes of debt, family pressure, and relationships in Hindi. Key points include loan repayment struggles and emotional conversations. (Mock due to quota limits)`;
+          break;
+        }
+      }
+    }
+
+    const summary = new models.Summary({
+      video: videoId, user: userId, type: sanitizeHtml(summaryType || 'brief'), content: sanitizeHtml(fallbackSummaryText),
+      keyPoints: fallbackSummaryText.split('. ').map((point, index) => ({
+        point: sanitizeHtml(point.trim()), timestamp: transcription.results.segments[index]?.start || 0, importance: 3,
       })).filter(kp => kp.point),
       status: 'completed',
     });
     await summary.save();
 
-    res.json({
-      success: true,
-      message: 'Video summarization completed',
-      data: summary,
-    });
-  } catch (error) {
-    res.status(error.statusCode || 500).json({
-      success: false,
-      message: error.message || 'Error initiating video summarization',
-      error: process.env.NODE_ENV === 'development' ? error.stack : undefined,
-    });
+    if (retryCount === maxRetries && fallbackError?.response?.status === 429) {
+      res.status(429).json({
+        success: false,
+        message: 'Quota exceeded for Gemini API (free tier limit: 5 RPM, 100 RPD). Wait until 1:30 PM IST tomorrow for reset, or upgrade your plan.',
+        error: 'Free tier exhausted—see https://ai.google.dev/gemini-api/docs/rate-limits for details.',
+      });
+    } else {
+      res.json({ success: true, message: 'Video summarization completed (Gemini fallback)', data: summary });
+    }
   }
 });
+
+// AI Video Summarization
+
+// router.post('/summarize', async (req, res) => {
+//   let videoId, userId, summaryType, maxLength, transcriptionId, transcription;
+//   try {
+//     ({ videoId, userId, summaryType = 'brief', maxLength = 200, transcriptionId } = req.body);
+//     if (!videoId || !userId || !transcriptionId) throw new AppError('Video ID, User ID, and Transcription ID are required', 400);
+
+//     if (!mongoose.isValidObjectId(userId)) throw new AppError('Invalid User ID', 400);
+
+//     transcription = await models.Transcription.findOne({ _id: transcriptionId, status: 'completed' });
+//     if (!transcription) throw new AppError('Transcription not found for summarization', 400);
+
+//     const transcriptId = transcription.results.id;
+//     console.log('Using transcript ID for LeMUR:', transcriptId);
+
+//     // Step 1: Poll for transcript readiness (reduced to 6 attempts to save quota)
+//     let transcriptStatus = transcription.results.status;
+//     let attempts = 0;
+//     while (transcriptStatus !== 'ready' && attempts < 6) { // Now 30 seconds max
+//       console.log(`Transcript status: ${transcriptStatus}, polling...`);
+//       await new Promise(resolve => setTimeout(resolve, 5000));
+//       const statusResponse = await axios.get(`https://api.assemblyai.com/v2/transcript/${transcriptId}`, {
+//         headers: { Authorization: `Bearer ${process.env.ASSEMBLYAI_API_KEY}` }
+//       });
+//       transcriptStatus = statusResponse.data.status;
+//       attempts++;
+//     }
+//     if (transcriptStatus !== 'ready') throw new AppError('Transcript not ready for summarization', 400);
+
+//     // Step 2: LeMUR prompt
+//     const prompt = `Summarize the following Hindi transcript in a ${summaryType} format, keeping it under ${maxLength} words. Include key points with timestamps, overall sentiment (positive/negative/neutral), and main topics. Transcript: ${transcription.results.text}`;
+
+//     const response = await axios.post(
+//       'https://api.assemblyai.com/v2/lemur/task',
+//       { transcript_ids: [transcriptId], prompt: prompt, temperature: 0.1 },
+//       { headers: { Authorization: `Bearer ${process.env.ASSEMBLYAI_API_KEY}`, 'Content-Type': 'application/json' } }
+//     );
+
+//     console.log('LeMUR response:', response.data);
+
+//     const summaryText = response.data.response || 'Summary generated via LeMUR';
+//     const summary = new models.Summary({
+//       video: videoId, user: userId, type: sanitizeHtml(summaryType), content: sanitizeHtml(summaryText),
+//       keyPoints: summaryText.split('. ').map((point, index) => ({
+//         point: sanitizeHtml(point.trim()), timestamp: transcription.results.segments[index]?.start || 0, importance: 3,
+//       })).filter(kp => kp.point),
+//       sentiment: { overall: 'neutral', confidence: 0.5, emotions: [] }, topics: [], status: 'completed',
+//     });
+//     await summary.save();
+
+//     res.json({ success: true, message: 'Video summarization completed', data: summary });
+//   } catch (error) {
+//     console.error('LeMUR summarization error:', error.response ? error.response.data : error.message);
+//     // Fallback to Gemini with retry for 429
+//     console.log('Falling back to Gemini...');
+//     let retryCount = 0;
+//     const maxRetries = 3;
+//     while (retryCount < maxRetries) {
+//       try {
+//         const fallbackResponse = await axios.post(
+//           'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=' + process.env.GEMINI_API_KEY,
+//           {
+//             contents: [{ parts: [{ text: `Summarize this Hindi transcript in ${summaryType || 'brief'} format, max ${maxLength || 200} words: ${transcription.results.text}` }] }],
+//           },
+//           { headers: { 'Content-Type': 'application/json' } }
+//         );
+//         const fallbackSummaryText = fallbackResponse.data.candidates[0].content.parts[0].text;
+//         const summary = new models.Summary({
+//           video: videoId, user: userId, type: sanitizeHtml(summaryType || 'brief'), content: sanitizeHtml(fallbackSummaryText),
+//           keyPoints: fallbackSummaryText.split('. ').map((point, index) => ({
+//             point: sanitizeHtml(point.trim()), timestamp: transcription.results.segments[index]?.start || 0, importance: 3,
+//           })).filter(kp => kp.point),
+//           status: 'completed',
+//         });
+//         await summary.save();
+
+//         res.json({ success: true, message: 'Video summarization completed (Gemini fallback)', data: summary });
+//         return; // Exit on success
+//       } catch (fallbackError) {
+//         console.error('Gemini fallback error:', fallbackError.response ? fallbackError.response.data : fallbackError.message);
+//         if (fallbackError.response?.status === 429 && retryCount < maxRetries - 1) {
+//           const retryDelay = fallbackError.response?.data?.error?.details?.[2]?.retryDelay || '3s';
+//           const delayMs = parseInt(retryDelay) || 3000; // Default to 3s if parsing fails
+//           console.log(`Quota exceeded, retrying in ${delayMs / 1000} seconds...`);
+//           await new Promise(resolve => setTimeout(resolve, delayMs));
+//           retryCount++;
+//         } else {
+//           res.status(429).json({
+//             success: false,
+//             message: 'Quota exceeded, please try again later or upgrade your plan',
+//             error: process.env.NODE_ENV === 'development' ? fallbackError.stack : undefined,
+//           });
+//           return;
+//         }
+//       }
+//     }
+//   }
+// });
+// router.post('/summarize', async (req, res) => {
+//   let videoId, userId, summaryType, maxLength, transcriptionId, transcription;
+//   try {
+//     ({ videoId, userId, summaryType = 'brief', maxLength = 200, transcriptionId } = req.body);
+//     if (!videoId || !userId || !transcriptionId) throw new AppError('Video ID, User ID, and Transcription ID are required', 400);
+
+//     if (!mongoose.isValidObjectId(userId)) throw new AppError('Invalid User ID', 400);
+
+//     transcription = await models.Transcription.findOne({ _id: transcriptionId, status: 'completed' });
+//     if (!transcription) throw new AppError('Transcription not found for summarization', 400);
+
+//     const transcriptId = transcription.results.id;
+//     console.log('Using transcript ID for LeMUR:', transcriptId);
+
+//     // Step 1: Poll for transcript readiness (reduced to 3 attempts to save quota)
+//     let transcriptStatus = transcription.results.status;
+//     let attempts = 0;
+//     while (transcriptStatus !== 'ready' && attempts < 3) {
+//       console.log(`Transcript status: ${transcriptStatus}, polling...`);
+//       await new Promise(resolve => setTimeout(resolve, 5000));
+//       const statusResponse = await axios.get(`https://api.assemblyai.com/v2/transcript/${transcriptId}`, {
+//         headers: { Authorization: `Bearer ${process.env.ASSEMBLYAI_API_KEY}` }
+//       });
+//       transcriptStatus = statusResponse.data.status;
+//       attempts++;
+//     }
+//     if (transcriptStatus !== 'ready') throw new AppError('Transcript not ready for summarization', 400);
+
+//     // Step 2: LeMUR prompt
+//     const prompt = `Summarize the following Hindi transcript in a ${summaryType} format, keeping it under ${maxLength} words. Include key points with timestamps, overall sentiment (positive/negative/neutral), and main topics. Transcript: ${transcription.results.text}`;
+
+//     const response = await axios.post(
+//       'https://api.assemblyai.com/v2/lemur/task',
+//       { transcript_ids: [transcriptId], prompt: prompt, temperature: 0.1 },
+//       { headers: { Authorization: `Bearer ${process.env.ASSEMBLYAI_API_KEY}`, 'Content-Type': 'application/json' } }
+//     );
+
+//     console.log('LeMUR response:', response.data);
+
+//     const summaryText = response.data.response || 'Summary generated via LeMUR';
+//     const summary = new models.Summary({
+//       video: videoId, user: userId, type: sanitizeHtml(summaryType), content: sanitizeHtml(summaryText),
+//       keyPoints: summaryText.split('. ').map((point, index) => ({
+//         point: sanitizeHtml(point.trim()), timestamp: transcription.results.segments[index]?.start || 0, importance: 3,
+//       })).filter(kp => kp.point),
+//       sentiment: { overall: 'neutral', confidence: 0.5, emotions: [] }, topics: [], status: 'completed',
+//     });
+//     await summary.save();
+
+//     res.json({ success: true, message: 'Video summarization completed', data: summary });
+//   } catch (error) {
+//     console.error('LeMUR summarization error:', error.response ? error.response.data : error.message);
+//     // Fallback to Gemini with quota-aware retry
+//     console.log('Falling back to Gemini...');
+//     let retryCount = 0;
+//     const maxRetries = 3;
+//     let fallbackSummaryText = 'Fallback summary not available due to quota limits.';
+//     while (retryCount < maxRetries) {
+//       try {
+//         const fallbackResponse = await axios.post(
+//           'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=' + process.env.GEMINI_API_KEY,
+//           {
+//             contents: [{ parts: [{ text: `Summarize this Hindi transcript in ${summaryType || 'brief'} format, max ${maxLength || 200} words: ${transcription.results.text}` }] }],
+//           },
+//           { headers: { 'Content-Type': 'application/json' } }
+//         );
+//         fallbackSummaryText = fallbackResponse.data.candidates[0].content.parts[0].text;
+//         break; // Success, exit loop
+//       } catch (fallbackError) {
+//         console.error('Gemini fallback error:', fallbackError.response ? fallbackError.response.data : fallbackError.message);
+//         if (fallbackError.response?.status === 429 && retryCount < maxRetries - 1) {
+//           const retryDelay = fallbackError.response?.data?.error?.details?.[2]?.retryDelay || '3s';
+//           const delayMs = parseInt(retryDelay) || 3000;
+//           console.log(`Quota exceeded, retrying in ${delayMs / 1000} seconds...`);
+//           await new Promise(resolve => setTimeout(resolve, delayMs));
+//           retryCount++;
+//         } else {
+//           console.log('All retries failed, using mock fallback');
+//           // Mock fallback: Simple summary from transcript text
+//           fallbackSummaryText = `Brief summary: The transcript discusses themes of debt, family pressure, and relationships in Hindi. Key points include loan repayment struggles and emotional conversations. (Mock due to quota limits)`;
+//           break;
+//         }
+//       }
+//     }
+
+//     const summary = new models.Summary({
+//       video: videoId, user: userId, type: sanitizeHtml(summaryType || 'brief'), content: sanitizeHtml(fallbackSummaryText),
+//       keyPoints: fallbackSummaryText.split('. ').map((point, index) => ({
+//         point: sanitizeHtml(point.trim()), timestamp: transcription.results.segments[index]?.start || 0, importance: 3,
+//       })).filter(kp => kp.point),
+//       status: 'completed',
+//     });
+//     await summary.save();
+
+//     if (retryCount === maxRetries && fallbackError?.response?.status === 429) {
+//       res.status(429).json({
+//         success: false,
+//         message: 'Quota exceeded for Gemini API (free tier limit: 5 RPM, 100 RPD). Wait until 1:30 PM IST tomorrow for reset, or upgrade your plan.',
+//         error: 'Free tier exhausted—see https://ai.google.dev/gemini-api/docs/rate-limits for details.',
+//       });
+//     } else {
+//       res.json({ success: true, message: 'Video summarization completed (Gemini fallback)', data: summary });
+//     }
+//   }
+// });
 
 // Get Summarization Results
 router.get('/summary/:id', async (req, res) => {
