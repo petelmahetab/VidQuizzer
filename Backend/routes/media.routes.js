@@ -264,7 +264,7 @@ router.post('/videos', authenticateToken, checkVideoLimit, videoUpload.array('vi
       const fileHash = await calculateFileHash(filePath);
 
       const newVideo = new Video({
-        user: req.user._id,
+        userId:req.user.id,
         title,
         description,
         filePath,

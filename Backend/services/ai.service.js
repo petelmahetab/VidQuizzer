@@ -9,6 +9,7 @@ class AIService {
     this.genAI = new GoogleGenerativeAI(process.env.GEMINI_AI_KEY);
     this.model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
   }
+  
 
   // Generate summary from transcript
   async generateSummary(transcript, type = 'detailed', language = 'en') {
@@ -27,9 +28,11 @@ class AIService {
       const fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
 
       const result = await this.model.generateContent(fullPrompt);
+      console.log('GEMINI_API_KEY:', process.env.GEMINI_API_KEY);
       const response = await result.response;
       const content = response.text();
 
+      
       return {
         content: content,
         wordCount: content.split(/\s+/).length,
@@ -40,6 +43,7 @@ class AIService {
       throw new Error('Failed to generate summary');
     }
   }
+  
 
   // Generate questions from transcript
   async generateQuestions(transcript, count = 5, difficulty = 'medium', types = ['multiple_choice', 'short_answer']) {
