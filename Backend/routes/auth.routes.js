@@ -85,60 +85,86 @@ router.post('/register', registerValidation, async (req, res) => {
   }
 });
 
-// Login user
 router.post('/login', loginValidation, async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: errors.array(),
-      });
+      return res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
     }
 
     const { email, password } = req.body;
 
-    // Find user
-    const user = await User.findOne({ email });
+    console.log('User model:', User);
+
+    // Ensure a Mongoose document is returned
+    const user = await User.findOne({ email }).exec();
+    console.log('User document:', user);
+    console.log('Has comparePassword?', typeof user?.comparePassword);
+
     if (!user) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid credentials',
-      });
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
-    // Verify password
-    const isValidPassword = await user.comparePassword(password);
-    if (!isValidPassword) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid credentials',
-      });
+    // Verify and use the document directly
+    if (typeof user.comparePassword !== 'function') {
+      console.log('Error: comparePassword method is missing from query result');
+      // Attempt to rehydrate with model context
+      const hydratedUser = new User(user.toObject());
+      console.log('Hydrated user, has comparePassword?', typeof hydratedUser.comparePassword);
+      if (typeof hydratedUser.comparePassword !== 'function') {
+        console.log('Fatal: Unable to attach comparePassword method');
+        return res.status(500).json({ success: false, message: 'Internal server error: Authentication method unavailable' });
+      }
+      const isValidPassword = await hydratedUser.comparePassword(password);
+      if (!isValidPassword) {
+        return res.status(401).json({ success: false, message: 'Invalid credentials' });
+      }
+    } else {
+      const isValidPassword = await user.comparePassword(password);
+      if (!isValidPassword) {
+        return res.status(401).json({ success: false, message: 'Invalid credentials' });
+      }
     }
 
-    // Generate JWT
-    const token = jwt.sign(
-      { id: user._id, email: user.email },
-      process.env.JWT_SECRET,
-      { expiresIn: '1d' }
-    );
+    const token = jwt.sign({ id: user._id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '1d' });
 
     res.json({
       success: true,
       message: 'Login successful',
+      data: { id: user._id, email: user.email, username: user.username, token },
+    });
+  } catch (error) {
+    console.error('Error logging in:', error);
+    res.status(500).json({ success: false, message: 'Error logging in', error: error.message });
+  }
+});
+
+router.get('/me', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select('-password');
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found',
+      });
+    }
+
+    res.json({
+      success: true,
       data: {
         id: user._id,
         email: user.email,
         username: user.username,
-        token,
+        plan: user.plan,
+        usage: user.usage,
+        preferences: user.preferences,
       },
     });
   } catch (error) {
-    console.error('Error logging in:', error);
+    console.error('Error fetching user:', error);
     res.status(500).json({
       success: false,
-      message: 'Error logging in',
+      message: 'Error fetching user',
       error: error.message,
     });
   }

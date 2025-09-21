@@ -370,7 +370,7 @@ router.put('/videos/:id', authenticateToken, validateId, videoUpload.single('vid
       { _id: req.params.id, user: req.user._id },
       { $set: updateData },
       { new: true, runValidators: true }
-    ).lean();
+    )
 
     if (!video) return res.status(404).json({ success: false, message: 'Video not found' });
 
@@ -644,7 +644,7 @@ router.get('/images/:id/file', authenticateToken, validateId, async (req, res) =
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
 
-    const image = await Image.findOne({ _id: req.params.id, user: req.user._id }).lean();
+    const image = await Image.findOne({ _id: req.params.id, user: req.user._id });
     if (!image) return res.status(404).json({ success: false, message: 'Image not found' });
     if (!image.cloudinaryUrl) return res.status(404).json({ success: false, message: 'Image file not found' });
 
@@ -750,7 +750,7 @@ router.get('/documents/:id/file', authenticateToken, validateId, async (req, res
     const errors = validationResult(req);
     if (!errors.isEmpty()) return res.status(400).json({ success: false, errors: errors.array() });
 
-    const document = await Document.findOne({ _id: req.params.id, user: req.user._id }).lean();
+    const document = await Document.findOne({ _id: req.params.id, user: req.user._id });
     if (!document) return res.status(404).json({ success: false, message: 'Document not found' });
     if (!document.cloudinaryUrl) return res.status(404).json({ success: false, message: 'Document file not found' });
 
