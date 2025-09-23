@@ -157,13 +157,34 @@ router.post('/transcribe', upload.single('video'), async (req, res) => {
     const video = await models.Video.findById(req.body.videoId);
     if (!video) throw new AppError('Video not found', 404);
 
-    console.log('Buffer length:', req.file.buffer.length);
+    // Log file details
+    console.log('File details:', {
+      originalName: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size,
+      bufferLength: req.file.buffer.length
+    });
 
-    const assembly = new AssemblyAI({ apiKey: process.env.ASSEMBLYAI_API_KEY });
+    // Validate file format
+    const supportedFormats = ['video/mp4', 'video/mpeg', 'audio/mpeg', 'audio/wav', 'audio/mp3'];
+    if (!supportedFormats.includes(req.file.mimetype)) {
+      throw new AppError(`Unsupported file format: ${req.file.mimetype}. Supported formats: ${supportedFormats.join(', ')}`, 400);
+    }
 
-    // Upload file
-    const uploadUrl = await assembly.files.upload(req.file.buffer);
-    console.log('Upload URL:', uploadUrl);
+    // Upload file to AssemblyAI
+    let uploadUrl;
+    try {
+      uploadUrl = await assembly.files.upload(req.file.buffer);
+      console.log('Upload URL:', uploadUrl);
+    } catch (uploadError) {
+      console.error('AssemblyAI upload error:', {
+        message: uploadError.message,
+        status: uploadError.response?.status,
+        data: uploadError.response?.data
+      });
+      throw new AppError(`File upload failed: ${uploadError.message}`, uploadError.response?.status || 500);
+    }
+
     if (!uploadUrl) throw new AppError('Upload URL missing', 500);
 
     // Transcribe
@@ -174,13 +195,19 @@ router.post('/transcribe', upload.single('video'), async (req, res) => {
 
     // Poll for completion
     let attempts = 0;
-    while (transcript.status !== 'completed' && attempts < 10) {
+    const maxAttempts = 10;
+    while (transcript.status !== 'completed' && transcript.status !== 'error' && attempts < maxAttempts) {
+      console.log(`Polling transcript ${transcript.id}, status: ${transcript.status}, attempt: ${attempts + 1}`);
       await new Promise(resolve => setTimeout(resolve, 5000));
       transcript = await assembly.transcripts.get(transcript.id);
       attempts++;
     }
+
+    if (transcript.status === 'error') {
+      throw new AppError(`Transcription failed: ${transcript.error || 'Unknown error'}`, 500);
+    }
     if (transcript.status !== 'completed') {
-      throw new AppError(`Transcription failed: ${transcript.status}`, 500);
+      throw new AppError(`Transcription timeout after ${maxAttempts} attempts, status: ${transcript.status}`, 500);
     }
 
     // Save to MongoDB
@@ -200,8 +227,14 @@ router.post('/transcribe', upload.single('video'), async (req, res) => {
 
     res.json({ success: true, transcript: savedTranscription });
   } catch (err) {
-    console.error('Transcription error:', err.message);
-    res.status(err.statusCode || 500).json({ success: false, message: err.message });
+    console.error('Transcription error:', {
+      message: err.message,
+      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    });
+    res.status(err.statusCode || 500).json({
+      success: false,
+      message: err.message || 'Error during transcription'
+    });
   }
 });
 

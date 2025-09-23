@@ -10,17 +10,7 @@ if (process.env.NODE_ENV === 'development') {
 // Define models
 const models = {};
 
-// User Schema
-if (!mongoose.models.User) {
-  const UserSchema = new Schema({
-    username: { type: String, required: true, unique: true },
-    email: { type: String, required: true, unique: true },
-    usage: { videosProcessed: { type: Number, default: 0 } },
-    canProcessVideo: { type: Schema.Types.Mixed, default: () => true }, // Simplified
-    createdAt: { type: Date, default: Date.now }
-  }, { collection: 'users' });
-  models.User = mongoose.model('User', UserSchema);
-}
+
 
 // Video Schema
 if (!mongoose.models.Video) {
