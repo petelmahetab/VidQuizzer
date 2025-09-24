@@ -31,6 +31,7 @@ if (!process.env.ASSEMBLYAI_API_KEY) throw new Error('ASSEMBLYAI_API_KEY is not 
 console.log('ASSEMBLYAI_API_KEY:', process.env.ASSEMBLYAI_API_KEY);
 const assembly = new AssemblyAI({ apiKey: process.env.ASSEMBLYAI_API_KEY });
 
+// testAPI();
 // Custom Error Class
 class AppError extends Error {
   constructor(message, statusCode) {
@@ -214,6 +215,69 @@ router.post('/transcribe', upload.single('video'), async (req, res) => {
     const savedTranscription = await models.Transcription.create({
       videoId: req.body.videoId,
       language: req.body.language || 'hi',
+      status: transcript.status,
+      results: {
+        id: transcript.id,
+        text: transcript.text || '',
+        status: transcript.status,
+        segments: transcript.words || []
+      },
+      processedAt: new Date(),
+      processingTime: Date.now() - (req.startTime || Date.now())
+    });
+
+    res.json({ success: true, transcript: savedTranscription });
+  } catch (err) {
+    console.error('Transcription error:', {
+      message: err.message,
+      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    });
+    res.status(err.statusCode || 500).json({
+      success: false,
+      message: err.message || 'Error during transcription'
+    });
+  }
+});
+router.post('/transcribe-url', async (req, res) => {
+  try {
+    const { url, videoId, language } = req.body;
+
+    if (!url) throw new AppError('No URL provided', 400);
+    if (!mongoose.isValidObjectId(videoId)) {
+      throw new AppError('Invalid videoId format', 400);
+    }
+
+    // Verify video exists
+    const video = await models.Video.findById(videoId);
+    if (!video) throw new AppError('Video not found', 404);
+
+    // Directly tell AssemblyAI to transcribe from URL
+    let transcript = await assembly.transcripts.create({
+      audio: url,
+      language_code: language || 'hi'
+    });
+
+    // Poll for completion
+    let attempts = 0;
+    const maxAttempts = 10;
+    while (transcript.status !== 'completed' && transcript.status !== 'error' && attempts < maxAttempts) {
+      console.log(`Polling transcript ${transcript.id}, status: ${transcript.status}, attempt: ${attempts + 1}`);
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      transcript = await assembly.transcripts.get(transcript.id);
+      attempts++;
+    }
+
+    if (transcript.status === 'error') {
+      throw new AppError(`Transcription failed: ${transcript.error || 'Unknown error'}`, 500);
+    }
+    if (transcript.status !== 'completed') {
+      throw new AppError(`Transcription timeout after ${maxAttempts} attempts, status: ${transcript.status}`, 500);
+    }
+
+    // Save to MongoDB
+    const savedTranscription = await models.Transcription.create({
+      videoId,
+      language: language || 'hi',
       status: transcript.status,
       results: {
         id: transcript.id,
