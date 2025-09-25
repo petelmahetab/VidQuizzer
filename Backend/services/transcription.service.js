@@ -29,27 +29,27 @@ class TranscriptionService {
   }
 
   async validateInputFile(filePath) {
-    return new Promise((resolve, reject) => {
-      const normalizedPath = path.normalize(filePath).replace(/\\/g, '/');
-      console.log('Validating input file:', normalizedPath);
-      if (!fs.existsSync(normalizedPath)) {
-        return reject(new Error(`File not found: ${normalizedPath}`));
+  return new Promise((resolve, reject) => {
+    const normalizedPath = path.normalize(filePath).replace(/\\/g, '/');
+    console.log('Validating input file:', normalizedPath);
+    if (!fs.existsSync(normalizedPath)) {
+      return reject(new Error(`File not found: ${normalizedPath}`));
+    }
+    ffmpeg.ffprobe(normalizedPath, (err, metadata) => {
+      if (err) {
+        console.error('FFprobe error:', err.message);
+        return reject(new Error(`Failed to probe file: ${err.message}`));
       }
-      ffmpeg.ffprobe(normalizedPath, (err, metadata) => {
-        if (err) {
-          console.error('FFprobe error:', err);
-          return reject(new Error(`Failed to probe file: ${err.message}`));
-        }
-        const audioStream = metadata.streams.find((stream) => stream.codec_type === 'audio');
-        if (!audioStream) {
-          console.error('No audio stream found in:', normalizedPath);
-          return reject(new Error('No audio stream found in input file'));
-        }
-        console.log('Audio stream found:', audioStream.codec_name);
-        resolve(metadata);
-      });
+      const audioStream = metadata.streams.find((stream) => stream.codec_type === 'audio');
+      if (!audioStream) {
+        console.error('No audio stream found in:', normalizedPath);
+        return reject(new Error('No audio stream found in input file'));
+      }
+      console.log('Audio stream found:', audioStream.codec_name);
+      resolve(metadata);
     });
-  }
+  });
+}
 
   async uploadFile(filePath) {
     try {

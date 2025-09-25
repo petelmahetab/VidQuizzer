@@ -11,20 +11,26 @@ import Image from '../models/Image.js';
 import Document from '../models/Document.js';
 import User from '../models/User.js';
 import TranscriptionService from '../services/transcription.service.js';
-import AIService from '../services/ai.service.js';
+import aiService from '../services/ai.service.js';
 import authMiddleware from '../middleware/auth.middleware.js';
 import ffmpeg from 'fluent-ffmpeg';
-import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import { execSync } from 'child_process';
 
-// Set FFmpeg path with fallback
+
+// Set FFmpeg and FFprobe paths to system binaries
+ffmpeg.setFfmpegPath('ffmpeg'); // Assumes ffmpeg is in PATH
+ffmpeg.setFfprobePath('ffprobe'); // Assumes ffprobe is in PATH
+
+// Verify FFmpeg and FFprobe accessibility
 try {
-  ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-  console.log('Using ffmpeg-installer path:', ffmpegInstaller.path);
+  const ffmpegVersion = execSync('ffmpeg -version', { encoding: 'utf8' });
+  // console.log('FFmpeg version:', ffmpegVersion);
+  const ffprobeVersion = execSync('ffprobe -version', { encoding: 'utf8' });
+  // console.log('FFprobe version:', ffprobeVersion);
 } catch (error) {
-  console.warn('Failed to set ffmpeg-installer path, falling back to system ffmpeg:', error.message);
-  ffmpeg.setFfmpegPath('ffmpeg');
+  // console.error('FFmpeg or FFprobe not accessible:', error.message);
+  process.exit(1);
 }
-
 // Configure Cloudinary
 cloudinary.v2.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -32,11 +38,7 @@ cloudinary.v2.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-// console.log('Loaded Config:', {
-//   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-//   api_key: process.env.CLOUDINARY_API_KEY,
-//   api_secret: process.env.CLOUDINARY_API_SECRET,
-// });
+
 
 const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
@@ -59,6 +61,20 @@ const ensureUploadDirs = () => {
 };
 ensureUploadDirs();
 
+// media.routes.js (at the top, after imports)
+const retryWithBackoff = async (fn, retries = 3, delay = 1000) => {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (error) {
+      if (i === retries - 1) throw error;
+      const backoffDelay = delay * Math.pow(2, i); // Exponential backoff: 1s, 2s, 4s
+      console.warn(`Retry ${i + 1}/${retries} failed, retrying in ${backoffDelay}ms...`, error.message);
+      await new Promise(resolve => setTimeout(resolve, backoffDelay));
+    }
+  }
+};
+
 // Multer storage configuration
 const createStorage = (subDir) => multer.diskStorage({
   destination: (req, file, cb) => {
@@ -74,7 +90,11 @@ const createStorage = (subDir) => multer.diskStorage({
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    const sanitizedFilename = file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
+    // Replace all non-alphanumeric characters (including emojis) with underscores
+    const sanitizedFilename = file.originalname
+      .replace(/[^a-zA-Z0-9.-]/g, '_')
+      .replace(/\s+/g, '_')
+      .replace(/_+/g, '_');
     cb(null, `video-${uniqueSuffix}${path.extname(sanitizedFilename)}`);
   },
 });
@@ -239,69 +259,103 @@ router.post('/videos', authenticateToken, checkVideoLimit, videoUpload.array('vi
         try { tags = JSON.parse(tags); } catch (e) { tags = []; }
       } else if (!Array.isArray(tags)) { tags = []; }
 
-      const filePath = path.normalize(file.path).replace(/\\/g, '/'); // Use forward slashes
-      console.log(`Processing file: ${filePath}`); // Debug log
-      if (!fs.existsSync(filePath)) {
-        console.error(`File not found after upload: ${filePath}`);
-        return res.status(400).json({ success: false, message: `Uploaded file ${file.originalname} not found` });
+      const filePath = path.normalize(file.path).replace(/\\/g, '/');
+      console.log(`Processing file: ${filePath}`);
+
+      // Verify file exists and is readable
+      try {
+        await fs.promises.access(filePath, fs.constants.R_OK);
+        const stats = await fs.promises.stat(filePath);
+        if (stats.size === 0) {
+          throw new Error('Uploaded file is empty');
+        }
+      } catch (err) {
+        console.error(`File access error for ${file.originalname}:`, err);
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        return res.status(400).json({ success: false, message: `File access error: ${file.originalname}` });
       }
 
       // Validate video file with ffprobe
       let metadata;
       try {
-        metadata = await new Promise((resolve, reject) => {
+        metadata = await retryWithBackoff(() => new Promise((resolve, reject) => {
           ffmpeg.ffprobe(filePath, (err, data) => {
             if (err) {
-              console.error(`FFprobe error for ${filePath}:`, err.message);
+              console.error(`FFprobe error for ${filePath}:`, {
+                message: err.message,
+                code: err.code,
+                errno: err.errno,
+                path: err.path,
+                stack: err.stack,
+              });
               reject(err);
             } else {
-              console.log(`FFprobe metadata:`, JSON.stringify(data, null, 2)); // Debug log
+              console.log(`FFprobe metadata for ${filePath}:`, JSON.stringify(data, null, 2));
               resolve(data);
             }
           });
-        });
+        }), 3, 1000);
       } catch (err) {
-        console.error(`FFprobe failed for ${file.originalname}:`, err.message);
+        console.error(`FFprobe failed for ${file.originalname}:`, err);
         if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-        return res.status(400).json({ success: false, message: `Invalid video file: ${file.originalname} (FFprobe failed)` });
+        return res.status(400).json({
+          success: false,
+          message: `Invalid video file: ${file.originalname} (FFprobe failed: ${err.message})`,
+        });
       }
 
-      // Ensure video stream exists
       const videoStream = metadata.streams.find(s => s.codec_type === 'video');
       if (!videoStream) {
         console.error(`No video stream found in ${file.originalname}`);
         if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-        return res.status(400).json({ success: false, message: `Invalid video file: ${file.originalname} (no video stream detected)` });
+        return res.status(400).json({
+          success: false,
+          message: `Invalid video file: ${file.originalname} (no video stream detected)`,
+        });
       }
 
-      const thumbnailDir = path.join(__dirname, '..', 'Uploads', 'thumbnails').replace(/\\/g, '/');
-      const thumbnailPath = path.join(thumbnailDir, `thumbnail-${file.filename}.jpg`).replace(/\\/g, '/');
-      let finalThumbnailPath = thumbnailPath;
+      // Upload to Cloudinary
+      let cloudinaryResult;
       try {
-        await new Promise((resolve, reject) => {
-          ffmpeg(filePath)
-            .screenshots({ count: 1, folder: thumbnailDir, filename: path.basename(thumbnailPath), size: '320x240', timemarks: ['5'] })
-            .on('end', () => {
-              console.log(`Thumbnail generated: ${thumbnailPath}`);
-              resolve();
-            })
-            .on('error', (err) => reject(new Error(`Thumbnail generation failed for ${file.originalname}: ${err.message}`)));
+        cloudinaryResult = await retryWithBackoff(() => cloudinary.v2.uploader.upload(filePath, {
+          resource_type: 'video',
+          folder: 'videos',
+        }), 3, 1000);
+      } catch (err) {
+        console.error(`Cloudinary upload failed for ${file.originalname}:`, err);
+        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+        return res.status(500).json({
+          success: false,
+          message: `Failed to upload ${file.originalname} to Cloudinary: ${err.message}`,
         });
+      }
+
+      // Generate thumbnail
+      let thumbnailUrl = null;
+      try {
+        const thumbnailResult = await retryWithBackoff(() => cloudinary.v2.uploader.upload(filePath, {
+          resource_type: 'image',
+          folder: 'thumbnails',
+          transformation: [{ width: 320, height: 240, crop: 'fill', duration: '5' }],
+        }), 3, 1000);
+        thumbnailUrl = thumbnailResult.secure_url;
       } catch (err) {
         console.warn('Thumbnail generation failed:', err.message);
-        const defaultThumbnail = path.join(__dirname, '..', 'Uploads', 'thumbnails', 'default-thumbnail.jpg').replace(/\\/g, '/');
-        finalThumbnailPath = fs.existsSync(defaultThumbnail) ? defaultThumbnail : null;
       }
 
-      const fileHash = await calculateFileHash(filePath);
+      // Delete local file
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+
+      const fileHash = await calculateFileHash(filePath).catch(() => null);
 
       const newVideo = new Video({
         user: req.user._id,
         title,
         description,
-        filePath,
+        cloudinaryUrl: cloudinaryResult.secure_url,
+        publicId: cloudinaryResult.public_id,
         fileSize: file.size,
-        thumbnail: finalThumbnailPath,
+        thumbnail: thumbnailUrl,
         isPublic,
         tags,
         duration: metadata.format.duration || 0,
@@ -317,11 +371,69 @@ router.post('/videos', authenticateToken, checkVideoLimit, videoUpload.array('vi
       });
 
       await newVideo.save();
-      console.log(`Video saved to MongoDB: ${newVideo._id}`); // Debug log
-      await User.findByIdAndUpdate(req.user._id, { $inc: { 'usage.videosProcessed': 1 } });
+      console.log(`Video saved to MongoDB: ${newVideo._id}`);
 
-      // Queue transcription and summarization
-      addVideoJob(newVideo._id, filePath);
+      // Process transcription
+      let transcription;
+      try {
+        transcription = await retryWithBackoff(() => transcriptionService.transcribeVideo(filePath), 3, 1000);
+      } catch (err) {
+        console.error(`Transcription failed for ${file.originalname}:`, err);
+        await Video.findByIdAndUpdate(newVideo._id, { status: 'failed', processingStage: 'transcription_failed' });
+        return res.status(500).json({
+          success: false,
+          message: `Transcription failed for ${file.originalname}: ${err.message}`,
+        });
+      }
+
+      await Video.findByIdAndUpdate(newVideo._id, {
+        transcript: {
+          text: transcription.text,
+          timestamped: transcription.timestamped,
+          language: transcription.language,
+          confidence: transcription.confidence,
+        },
+        status: 'processing',
+        processingStage: 'summarization',
+      });
+
+      // Generate summary
+      let summaryResult;
+      try {
+        summaryResult = await retryWithBackoff(() => aiService.generateSummary(transcription.text, 'detailed', transcription.language), 3, 1000);
+      } catch (err) {
+        console.error(`Summary generation failed for ${file.originalname}:`, err);
+        await Video.findByIdAndUpdate(newVideo._id, { status: 'failed', processingStage: 'summarization_failed' });
+        return res.status(500).json({
+          success: false,
+          message: `Summary generation failed for ${file.originalname}: ${err.message}`,
+        });
+      }
+
+      await Video.findByIdAndUpdate(newVideo._id, {
+        summary: summaryResult.content,
+        status: 'processing',
+        processingStage: 'question_generation',
+      });
+
+      // Generate questions
+      let questions;
+      try {
+        questions = await retryWithBackoff(() => aiService.generateQuestions(transcription.text, 5, 'medium', ['multiple_choice', 'short_answer']), 3, 1000);
+      } catch (err) {
+        console.error(`Question generation failed for ${file.originalname}:`, err);
+        await Video.findByIdAndUpdate(newVideo._id, { status: 'failed', processingStage: 'question_generation_failed' });
+        return res.status(500).json({
+          success: false,
+          message: `Question generation failed for ${file.originalname}: ${err.message}`,
+        });
+      }
+
+      await Video.findByIdAndUpdate(newVideo._id, {
+        questions,
+        status: 'completed',
+        processingStage: 'completed',
+      });
 
       uploadResults.push({
         id: newVideo._id,
@@ -329,7 +441,8 @@ router.post('/videos', authenticateToken, checkVideoLimit, videoUpload.array('vi
         filename: file.filename,
         mimetype: file.mimetype,
         size: file.size,
-        path: filePath,
+        cloudinaryUrl: cloudinaryResult.secure_url,
+        publicId: cloudinaryResult.public_id,
         hash: fileHash,
         uploadDate: newVideo.createdAt,
         type: 'video',
@@ -339,6 +452,8 @@ router.post('/videos', authenticateToken, checkVideoLimit, videoUpload.array('vi
           duration: newVideo.duration,
           resolution: newVideo.metadata.resolution,
         },
+        summary: summaryResult.content,
+        questions,
       });
     }
 

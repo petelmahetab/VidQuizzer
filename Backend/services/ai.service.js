@@ -1,17 +1,28 @@
-
+// services/ai.service.js
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import axios from 'axios';
-import dotenv from 'dotenv'
-dotenv.config()
+import dotenv from 'dotenv';
+dotenv.config();
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Load .env file explicitly
+dotenv.config({ path: path.resolve(__dirname, '..', '.env') });
 
 class AIService {
   constructor() {
-    this.genAI = new GoogleGenerativeAI(process.env.GEMINI_AI_KEY);
+    if (!process.env.GEMINI_API_KEY) {
+      console.error('GEMINI_API_KEY is not set in .env. Available env vars:', Object.keys(process.env));
+      throw new Error('Missing Gemini API key');
+    }
+    console.log('GEMINI_API_KEY loaded:', process.env.GEMINI_API_KEY.substring(0, 4) + '...');
+    this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
     this.model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    console.log('AIService initialized');
   }
-  
 
-  // Generate summary from transcript
   async generateSummary(transcript, type = 'detailed', language = 'en') {
     try {
       const prompts = {
@@ -19,33 +30,33 @@ class AIService {
         detailed: `Provide a comprehensive summary of this video transcript, including main topics, key insights, and important details:\n\n${transcript}`,
         comprehensive: `Create a thorough analysis of this video transcript including: main themes, detailed explanations, examples mentioned, conclusions, and actionable insights:\n\n${transcript}`,
         bullet_points: `Convert this video transcript into clear bullet points covering all major topics and subtopics:\n\n${transcript}`,
-        key_insights: `Extract the most important insights, lessons, and takeaways from this video transcript:\n\n${transcript}`
+        key_insights: `Extract the most important insights, lessons, and takeaways from this video transcript:\n\n${transcript}`,
       };
 
       const systemPrompt = `You are an expert content summarizer. Create summaries that are clear, concise, and capture the essence of the content. Respond in ${language} language.`;
       const userPrompt = prompts[type] || prompts.detailed;
-      
       const fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
 
       const result = await this.model.generateContent(fullPrompt);
-      console.log('GEMINI_API_KEY:', process.env.GEMINI_API_KEY);
       const response = await result.response;
       const content = response.text();
 
-      
       return {
         content: content,
         wordCount: content.split(/\s+/).length,
-        model: 'gemini-1.5-flash'
+        model: 'gemini-1.5-flash',
       };
     } catch (error) {
-      console.error('Summary generation error:', error);
-      throw new Error('Failed to generate summary');
+      console.error('Summary generation error:', {
+        message: error.message,
+        status: error.status,
+        statusText: error.statusText,
+        errorDetails: error.errorDetails || 'No additional details',
+      });
+      throw new Error('Failed to generate summary: ' + error.message);
     }
   }
-  
 
-  // Generate questions from transcript
   async generateQuestions(transcript, count = 5, difficulty = 'medium', types = ['multiple_choice', 'short_answer']) {
     try {
       const prompt = `Based on this video transcript, generate ${count} ${difficulty} difficulty questions. 
@@ -80,24 +91,26 @@ class AIService {
       const result = await this.model.generateContent(prompt);
       const response = await result.response;
       const content = response.text();
-
-      // Clean the response to extract JSON
       const cleanContent = content.replace(/```json|```/g, '').trim();
       const questions = JSON.parse(cleanContent);
-      
+
       return questions.map(q => ({
         ...q,
         aiGenerated: true,
         aiModel: 'gemini-1.5-flash',
-        confidence: Math.random() * 0.3 + 0.7 // Simulate confidence score
+        confidence: Math.random() * 0.3 + 0.7,
       }));
     } catch (error) {
-      console.error('Question generation error:', error);
-      throw new Error('Failed to generate questions');
+      console.error('Question generation error:', {
+        message: error.message,
+        status: error.status,
+        statusText: error.statusText,
+        errorDetails: error.errorDetails || 'No additional details',
+      });
+      throw new Error('Failed to generate questions: ' + error.message);
     }
   }
 
-  // Extract key topics from transcript
   async extractTopics(transcript) {
     try {
       const prompt = `Analyze this video transcript and extract the main topics, themes, and subjects discussed. 
@@ -118,17 +131,19 @@ class AIService {
       const result = await this.model.generateContent(prompt);
       const response = await result.response;
       const content = response.text();
-
-      // Clean the response to extract JSON
       const cleanContent = content.replace(/```json|```/g, '').trim();
       return JSON.parse(cleanContent);
     } catch (error) {
-      console.error('Topic extraction error:', error);
+      console.error('Topic extraction error:', {
+        message: error.message,
+        status: error.status,
+        statusText: error.statusText,
+        errorDetails: error.errorDetails || 'No additional details',
+      });
       return [];
     }
   }
 
-  // Analyze sentiment of transcript
   async analyzeSentiment(transcript) {
     try {
       const prompt = `Analyze the sentiment and emotional tone of this video transcript. 
@@ -150,22 +165,24 @@ class AIService {
       const result = await this.model.generateContent(prompt);
       const response = await result.response;
       const content = response.text();
-
-      // Clean the response to extract JSON
       const cleanContent = content.replace(/```json|```/g, '').trim();
       return JSON.parse(cleanContent);
     } catch (error) {
-      console.error('Sentiment analysis error:', error);
+      console.error('Sentiment analysis error:', {
+        message: error.message,
+        status: error.status,
+        statusText: error.statusText,
+        errorDetails: error.errorDetails || 'No additional details',
+      });
       return {
         overall: 'neutral',
         confidence: 0,
         emotions: [],
-        reasoning: 'Analysis failed'
+        reasoning: 'Analysis failed',
       };
     }
   }
 
-  // Generate key points with timestamps
   async generateKeyPoints(transcript, timestampedText) {
     try {
       const prompt = `Based on this video transcript and timestamps, identify the most important key points and their approximate timestamps.
@@ -189,17 +206,19 @@ class AIService {
       const result = await this.model.generateContent(prompt);
       const response = await result.response;
       const content = response.text();
-
-      // Clean the response to extract JSON
       const cleanContent = content.replace(/```json|```/g, '').trim();
       return JSON.parse(cleanContent);
     } catch (error) {
-      console.error('Key points generation error:', error);
+      console.error('Key points generation error:', {
+        message: error.message,
+        status: error.status,
+        statusText: error.statusText,
+        errorDetails: error.errorDetails || 'No additional details',
+      });
       return [];
     }
   }
 
-  // Chat with video content
   async chatWithVideo(transcript, question, conversationHistory = []) {
     try {
       let conversationContext = '';
@@ -225,38 +244,38 @@ class AIService {
       return {
         answer: content,
         timestamp: this.findRelevantTimestamp(transcript, question),
-        confidence: Math.random() * 0.3 + 0.7
+        confidence: Math.random() * 0.3 + 0.7,
       };
     } catch (error) {
-      console.error('Chat error:', error);
-      throw new Error('Failed to process question');
+      console.error('Chat error:', {
+        message: error.message,
+        status: error.status,
+        statusText: error.statusText,
+        errorDetails: error.errorDetails || 'No additional details',
+      });
+      throw new Error('Failed to process question: ' + error.message);
     }
   }
 
-  // Helper method to get max tokens based on summary type (not needed for Gemini but kept for compatibility)
   getMaxTokens(type) {
     const tokenLimits = {
       brief: 150,
       detailed: 800,
       comprehensive: 1500,
       bullet_points: 600,
-      key_insights: 800
+      key_insights: 800,
     };
     return tokenLimits[type] || 800;
   }
 
-  // Helper method to find relevant timestamp (simplified)
   findRelevantTimestamp(transcript, question) {
-    // This is a simplified implementation
-    // In a real app, you'd use more sophisticated text matching
     const words = question.toLowerCase().split(' ');
     const transcriptLower = transcript.toLowerCase();
     
     for (const word of words) {
       const index = transcriptLower.indexOf(word);
       if (index !== -1) {
-        // Rough estimation of timestamp based on text position
-        return Math.floor((index / transcriptLower.length) * 300); // Assuming 5-minute video
+        return Math.floor((index / transcriptLower.length) * 300);
       }
     }
     
