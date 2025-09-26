@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 
 const videoSchema = new mongoose.Schema({
-  userId: {
+  user: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true,
@@ -52,8 +52,12 @@ const videoSchema = new mongoose.Schema({
   },
   processingStage: {
     type: String,
-    enum: ['transcription', 'summarization', 'question_generation', 'completed'],
+    enum: ['transcription', 'summarization', 'completed', 'transcription_failed', 'summarization_failed'],
     default: 'transcription',
+  },
+  error: {
+    type: String,
+    default: null,
   },
   transcript: {
     text: {
@@ -70,16 +74,59 @@ const videoSchema = new mongoose.Schema({
       type: String,
       default: 'en',
     },
+    confidence: {
+      type: Number,
+      default: 0,
+    },
+    speakers: [{
+      speaker: String,
+      start: Number,
+      end: Number,
+      text: String,
+      confidence: Number,
+    }],
+    chapters: [{
+      start: Number,
+      end: Number,
+      headline: String,
+      gist: String,
+      summary: String,
+    }],
+    entities: [{
+      start: Number,
+      end: Number,
+      text: String,
+      entityType: String,
+    }],
+    sentiment: [{
+      start: Number,
+      end: Number,
+      text: String,
+      sentiment: String,
+      confidence: Number,
+    }],
+    highlights: [{
+      text: String,
+      count: Number,
+      rank: Number,
+      timestamps: [{
+        start: Number,
+        end: Number,
+      }],
+    }],
   },
-  metadata: {
-    format: String,
-    codec: String,
-    bitrate: Number,
-    resolution: String,
-    fps: Number,
-    uploadedAt: {
+  summary: {
+    text: {
+      type: String,
+      default: '',
+    },
+    generatedAt: {
       type: Date,
-      default: Date.now,
+      default: null,
+    },
+    model: {
+      type: String,
+      default: 'gemini-1.5-flash-001',
     },
   },
   tags: [{

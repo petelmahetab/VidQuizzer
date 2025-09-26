@@ -1,7 +1,6 @@
-// services/ai.service.js
+// Backend/services/ai.service.js
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import dotenv from 'dotenv';
-dotenv.config();
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -19,8 +18,34 @@ class AIService {
     }
     console.log('GEMINI_API_KEY loaded:', process.env.GEMINI_API_KEY.substring(0, 4) + '...');
     this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    this.model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-    console.log('AIService initialized');
+    // Initialize with a stable model
+    this.models = [
+      'gemini-1.5-flash-001', // Stable for free keys
+      'gemini-1.5-flash',     // Fallback
+      'gemini-1.5-pro',       // Fallback (if accessible)
+    ];
+    console.log('AIService initialized with models:', this.models);
+  }
+
+  async tryModel(method, ...args) {
+    for (const modelName of this.models) {
+      try {
+        console.log(`Attempting ${method} with model: ${modelName}`);
+        const model = this.genAI.getGenerativeModel({ model: modelName });
+        const result = await model.generateContent(...args);
+        const response = await result.response;
+        console.log(`${method} succeeded with model: ${modelName}`);
+        return { response, model: modelName };
+      } catch (error) {
+        console.warn(`Model ${modelName} failed for ${method}:`, error.message);
+        if (error.status === 404) {
+          console.log(`Model ${modelName} not available; trying next fallback.`);
+          continue;
+        }
+        throw error;
+      }
+    }
+    throw new Error(`All models failed for ${method}. Check your API key or try a different key from Google AI Studio.`);
   }
 
   async generateSummary(transcript, type = 'detailed', language = 'en') {
@@ -37,14 +62,13 @@ class AIService {
       const userPrompt = prompts[type] || prompts.detailed;
       const fullPrompt = `${systemPrompt}\n\n${userPrompt}`;
 
-      const result = await this.model.generateContent(fullPrompt);
-      const response = await result.response;
+      const { response, model } = await this.tryModel('generateSummary', fullPrompt);
       const content = response.text();
 
       return {
         content: content,
         wordCount: content.split(/\s+/).length,
-        model: 'gemini-1.5-flash',
+        model,
       };
     } catch (error) {
       console.error('Summary generation error:', {
@@ -53,7 +77,12 @@ class AIService {
         statusText: error.statusText,
         errorDetails: error.errorDetails || 'No additional details',
       });
-      throw new Error('Failed to generate summary: ' + error.message);
+      return {
+        content: 'Summary generation failed due to API error.',
+        wordCount: 0,
+        model: 'none',
+        error: error.message,
+      };
     }
   }
 
@@ -88,8 +117,7 @@ class AIService {
       
       Transcript: ${transcript}`;
 
-      const result = await this.model.generateContent(prompt);
-      const response = await result.response;
+      const { response, model } = await this.tryModel('generateQuestions', prompt);
       const content = response.text();
       const cleanContent = content.replace(/```json|```/g, '').trim();
       const questions = JSON.parse(cleanContent);
@@ -97,7 +125,7 @@ class AIService {
       return questions.map(q => ({
         ...q,
         aiGenerated: true,
-        aiModel: 'gemini-1.5-flash',
+        aiModel: model,
         confidence: Math.random() * 0.3 + 0.7,
       }));
     } catch (error) {
@@ -107,7 +135,7 @@ class AIService {
         statusText: error.statusText,
         errorDetails: error.errorDetails || 'No additional details',
       });
-      throw new Error('Failed to generate questions: ' + error.message);
+      return [];
     }
   }
 
@@ -128,8 +156,7 @@ class AIService {
       
       Transcript: ${transcript}`;
 
-      const result = await this.model.generateContent(prompt);
-      const response = await result.response;
+      const { response, model } = await this.tryModel('extractTopics', prompt);
       const content = response.text();
       const cleanContent = content.replace(/```json|```/g, '').trim();
       return JSON.parse(cleanContent);
@@ -162,8 +189,7 @@ class AIService {
       
       Transcript: ${transcript}`;
 
-      const result = await this.model.generateContent(prompt);
-      const response = await result.response;
+      const { response, model } = await this.tryModel('analyzeSentiment', prompt);
       const content = response.text();
       const cleanContent = content.replace(/```json|```/g, '').trim();
       return JSON.parse(cleanContent);
@@ -203,8 +229,7 @@ class AIService {
       
       Timestamped segments: ${JSON.stringify(timestampedText.slice(0, 10))}`;
 
-      const result = await this.model.generateContent(prompt);
-      const response = await result.response;
+      const { response, model } = await this.tryModel('generateKeyPoints', prompt);
       const content = response.text();
       const cleanContent = content.replace(/```json|```/g, '').trim();
       return JSON.parse(cleanContent);
@@ -237,14 +262,14 @@ class AIService {
       
       User question: ${question}`;
 
-      const result = await this.model.generateContent(prompt);
-      const response = await result.response;
+      const { response, model } = await this.tryModel('chatWithVideo', prompt);
       const content = response.text();
 
       return {
         answer: content,
         timestamp: this.findRelevantTimestamp(transcript, question),
         confidence: Math.random() * 0.3 + 0.7,
+        model,
       };
     } catch (error) {
       console.error('Chat error:', {
@@ -253,7 +278,13 @@ class AIService {
         statusText: error.statusText,
         errorDetails: error.errorDetails || 'No additional details',
       });
-      throw new Error('Failed to process question: ' + error.message);
+      return {
+        answer: 'Failed to process question due to API error.',
+        timestamp: 0,
+        confidence: 0,
+        model: 'none',
+        error: error.message,
+      };
     }
   }
 

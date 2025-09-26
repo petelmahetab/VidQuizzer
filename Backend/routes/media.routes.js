@@ -11,10 +11,11 @@ import Image from '../models/Image.js';
 import Document from '../models/Document.js';
 import User from '../models/User.js';
 import TranscriptionService from '../services/transcription.service.js';
-import aiService from '../services/ai.service.js';
+import AIService from '../services/ai.service.js';
 import authMiddleware from '../middleware/auth.middleware.js';
 import ffmpeg from 'fluent-ffmpeg';
 import { execSync } from 'child_process';
+import { addVideoJob } from '../Jobs/videoProcessor.js';
 
 
 // Set FFmpeg and FFprobe paths to system binaries
@@ -90,11 +91,7 @@ const createStorage = (subDir) => multer.diskStorage({
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    // Replace all non-alphanumeric characters (including emojis) with underscores
-    const sanitizedFilename = file.originalname
-      .replace(/[^a-zA-Z0-9.-]/g, '_')
-      .replace(/\s+/g, '_')
-      .replace(/_+/g, '_');
+    const sanitizedFilename = file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
     cb(null, `video-${uniqueSuffix}${path.extname(sanitizedFilename)}`);
   },
 });
@@ -134,8 +131,16 @@ const documentFileFilter = (req, file, cb) => {
 // Multer configurations
 const videoUpload = multer({
   storage: createStorage('videos'),
-  limits: { fileSize: 1024 * 1024 * 1024 }, // 2GB
-  fileFilter: videoFileFilter,
+  limits: { fileSize: 1024 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const filetypes = /mp4|mov|avi|mkv/;
+    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = filetypes.test(file.mimetype.split('/')[1]);
+    if (extname && mimetype) {
+      return cb(null, true);
+    }
+    cb(new Error('Only video files (mp4, mov, avi, mkv) are allowed'));
+  },
 });
 
 const imageUpload = multer({
@@ -253,6 +258,8 @@ router.post('/videos', authenticateToken, checkVideoLimit, videoUpload.array('vi
     }
 
     const uploadResults = [];
+    const transcriptionService = new TranscriptionService();
+
     for (const file of req.files) {
       let { title = 'Untitled Video', description = '', isPublic = false, tags = [] } = req.body;
       if (typeof tags === 'string') {
@@ -271,89 +278,91 @@ router.post('/videos', authenticateToken, checkVideoLimit, videoUpload.array('vi
         }
       } catch (err) {
         console.error(`File access error for ${file.originalname}:`, err);
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
         return res.status(400).json({ success: false, message: `File access error: ${file.originalname}` });
       }
 
       // Validate video file with ffprobe
       let metadata;
       try {
-        metadata = await retryWithBackoff(() => new Promise((resolve, reject) => {
+        metadata = await new Promise((resolve, reject) => {
           ffmpeg.ffprobe(filePath, (err, data) => {
             if (err) {
-              console.error(`FFprobe error for ${filePath}:`, {
-                message: err.message,
-                code: err.code,
-                errno: err.errno,
-                path: err.path,
-                stack: err.stack,
-              });
+              console.error(`FFprobe error for ${filePath}:`, err.message);
               reject(err);
             } else {
-              console.log(`FFprobe metadata for ${filePath}:`, JSON.stringify(data, null, 2));
+              console.log(`FFprobe metadata:`, JSON.stringify(data, null, 2));
               resolve(data);
             }
           });
-        }), 3, 1000);
-      } catch (err) {
-        console.error(`FFprobe failed for ${file.originalname}:`, err);
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-        return res.status(400).json({
-          success: false,
-          message: `Invalid video file: ${file.originalname} (FFprobe failed: ${err.message})`,
         });
+      } catch (err) {
+        console.error(`FFprobe failed for ${file.originalname}:`, err.message);
+        return res.status(400).json({ success: false, message: `Invalid video file: ${file.originalname} (FFprobe failed: ${err.message})` });
       }
 
+      // Ensure video and audio streams exist
       const videoStream = metadata.streams.find(s => s.codec_type === 'video');
-      if (!videoStream) {
-        console.error(`No video stream found in ${file.originalname}`);
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-        return res.status(400).json({
-          success: false,
-          message: `Invalid video file: ${file.originalname} (no video stream detected)`,
-        });
+      const audioStream = metadata.streams.find(s => s.codec_type === 'audio');
+      if (!videoStream || !audioStream) {
+        console.error(`Invalid streams in ${file.originalname}: video=${!!videoStream}, audio=${!!audioStream}`);
+        return res.status(400).json({ success: false, message: `Invalid video file: ${file.originalname} (missing video or audio stream)` });
       }
 
-      // Upload to Cloudinary
-      let cloudinaryResult;
-      try {
-        cloudinaryResult = await retryWithBackoff(() => cloudinary.v2.uploader.upload(filePath, {
-          resource_type: 'video',
-          folder: 'videos',
-        }), 3, 1000);
-      } catch (err) {
-        console.error(`Cloudinary upload failed for ${file.originalname}:`, err);
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-        return res.status(500).json({
-          success: false,
-          message: `Failed to upload ${file.originalname} to Cloudinary: ${err.message}`,
-        });
-      }
-
-      // Generate thumbnail
+      // Generate thumbnail locally
+      const thumbnailDir = path.join(__dirname, '..', 'Uploads', 'thumbnails').replace(/\\/g, '/');
+      const thumbnailPath = path.join(thumbnailDir, `thumbnail-${file.filename}.jpg`).replace(/\\/g, '/');
       let thumbnailUrl = null;
       try {
-        const thumbnailResult = await retryWithBackoff(() => cloudinary.v2.uploader.upload(filePath, {
+        await new Promise((resolve, reject) => {
+          ffmpeg(filePath)
+            .screenshots({ count: 1, folder: thumbnailDir, filename: path.basename(thumbnailPath), size: '320x240', timemarks: ['5'] })
+            .on('end', () => {
+              console.log(`Thumbnail generated: ${thumbnailPath}`);
+              resolve();
+            })
+            .on('error', (err) => reject(new Error(`Thumbnail generation failed for ${file.originalname}: ${err.message}`)));
+        });
+
+        // Upload thumbnail to Cloudinary
+        const thumbnailResult = await retryWithBackoff(() => cloudinary.v2.uploader.upload(thumbnailPath, {
           resource_type: 'image',
           folder: 'thumbnails',
-          transformation: [{ width: 320, height: 240, crop: 'fill', duration: '5' }],
-        }), 3, 1000);
+        }));
         thumbnailUrl = thumbnailResult.secure_url;
+        console.log(`Thumbnail uploaded to Cloudinary: ${thumbnailUrl}`);
+
+        // Delete local thumbnail
+        if (fs.existsSync(thumbnailPath)) {
+          fs.unlinkSync(thumbnailPath);
+          console.log(`Deleted local thumbnail: ${thumbnailPath}`);
+        }
       } catch (err) {
-        console.warn('Thumbnail generation failed:', err.message);
+        console.warn('Thumbnail generation/upload failed:', err.message);
+        const defaultThumbnail = path.join(__dirname, '..', 'Uploads', 'thumbnails', 'default-thumbnail.jpg').replace(/\\/g, '/');
+        thumbnailUrl = fs.existsSync(defaultThumbnail) ? defaultThumbnail : null;
       }
 
-      // Delete local file
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-
       const fileHash = await calculateFileHash(filePath).catch(() => null);
+
+      // Safely calculate resolution and fps
+      const resolution = videoStream && videoStream.width && videoStream.height
+        ? `${videoStream.width}x${videoStream.height}`
+        : 'unknown';
+      let fps = 0;
+      try {
+        if (videoStream.r_frame_rate) {
+          const [num, den] = videoStream.r_frame_rate.split('/').map(Number);
+          fps = num && den ? num / den : 0;
+        }
+      } catch (err) {
+        console.warn(`Failed to parse fps for ${file.originalname}:`, err.message);
+      }
 
       const newVideo = new Video({
         user: req.user._id,
         title,
         description,
-        cloudinaryUrl: cloudinaryResult.secure_url,
-        publicId: cloudinaryResult.public_id,
+        filePath,
         fileSize: file.size,
         thumbnail: thumbnailUrl,
         isPublic,
@@ -363,8 +372,8 @@ router.post('/videos', authenticateToken, checkVideoLimit, videoUpload.array('vi
           format: metadata.format.format_name || 'unknown',
           codec: videoStream.codec_name || 'unknown',
           bitrate: metadata.format.bit_rate || 0,
-          resolution: videoStream.width && videoStream.height ? `${videoStream.width}x${videoStream.height}` : 'unknown',
-          fps: videoStream.r_frame_rate ? Number(eval(videoStream.r_frame_rate)) || 0 : 0,
+          resolution,
+          fps,
           uploadedAt: new Date(),
         },
         status: 'uploading',
@@ -373,67 +382,78 @@ router.post('/videos', authenticateToken, checkVideoLimit, videoUpload.array('vi
       await newVideo.save();
       console.log(`Video saved to MongoDB: ${newVideo._id}`);
 
+      await User.findByIdAndUpdate(req.user._id, { $inc: { 'usage.videosProcessed': 1 } });
+
       // Process transcription
       let transcription;
       try {
-        transcription = await retryWithBackoff(() => transcriptionService.transcribeVideo(filePath), 3, 1000);
+        transcription = await retryWithBackoff(() => transcriptionService.transcribeVideo(filePath));
+        console.log(`Transcription completed for ${file.originalname}:`, transcription.text.substring(0, 100) + '...');
+        await Video.findByIdAndUpdate(newVideo._id, {
+          status: 'processing',
+          processingStage: 'summarization',
+          transcript: {
+            text: transcription.text || '',
+            timestamped: transcription.timestamped || [],
+            language: transcription.language || 'en',
+            confidence: transcription.confidence || 0,
+            speakers: transcription.speakers || [],
+            chapters: transcription.chapters || [],
+            entities: transcription.entities || [],
+            sentiment: transcription.sentiment || [],
+            highlights: transcription.highlights || [],
+          },
+        });
+        // Log the updated document
+        const updatedDoc = await Video.findById(newVideo._id);
+        console.log(`MongoDB document after transcription:`, JSON.stringify(updatedDoc, null, 2));
       } catch (err) {
         console.error(`Transcription failed for ${file.originalname}:`, err);
-        await Video.findByIdAndUpdate(newVideo._id, { status: 'failed', processingStage: 'transcription_failed' });
+        await Video.findByIdAndUpdate(newVideo._id, {
+          status: 'failed',
+          processingStage: 'transcription_failed',
+          error: err.message,
+        });
         return res.status(500).json({
           success: false,
           message: `Transcription failed for ${file.originalname}: ${err.message}`,
         });
       }
 
-      await Video.findByIdAndUpdate(newVideo._id, {
-        transcript: {
-          text: transcription.text,
-          timestamped: transcription.timestamped,
-          language: transcription.language,
-          confidence: transcription.confidence,
-        },
-        status: 'processing',
-        processingStage: 'summarization',
-      });
-
       // Generate summary
-      let summaryResult;
+      let summary;
       try {
-        summaryResult = await retryWithBackoff(() => aiService.generateSummary(transcription.text, 'detailed', transcription.language), 3, 1000);
+        summary = await retryWithBackoff(() => AIService.generateSummary(transcription.text, 'detailed', transcription.language));
+        console.log(`Summary generated for ${file.originalname}:`, summary.content.substring(0, 100) + '...');
+        await Video.findByIdAndUpdate(newVideo._id, {
+          status: summary.error ? 'failed' : 'completed',
+          processingStage: summary.error ? 'summarization_failed' : 'completed',
+          summary: {
+            text: summary.content || '',
+            generatedAt: new Date(),
+            model: summary.model || 'none',
+          },
+          error: summary.error || null,
+        });
+        // Log the final document
+        const finalDoc = await Video.findById(newVideo._id);
+        console.log(`MongoDB document after summarization:`, JSON.stringify(finalDoc, null, 2));
       } catch (err) {
         console.error(`Summary generation failed for ${file.originalname}:`, err);
-        await Video.findByIdAndUpdate(newVideo._id, { status: 'failed', processingStage: 'summarization_failed' });
-        return res.status(500).json({
-          success: false,
-          message: `Summary generation failed for ${file.originalname}: ${err.message}`,
+        await Video.findByIdAndUpdate(newVideo._id, {
+          status: 'failed',
+          processingStage: 'summarization_failed',
+          summary: {
+            text: 'Summary generation failed due to API error.',
+            generatedAt: new Date(),
+            model: 'none',
+          },
+          error: err.message,
         });
+        const finalDoc = await Video.findById(newVideo._id);
+        console.log(`MongoDB document after failed summarization:`, JSON.stringify(finalDoc, null, 2));
+        // Continue to include in response despite failure
       }
-
-      await Video.findByIdAndUpdate(newVideo._id, {
-        summary: summaryResult.content,
-        status: 'processing',
-        processingStage: 'question_generation',
-      });
-
-      // Generate questions
-      let questions;
-      try {
-        questions = await retryWithBackoff(() => aiService.generateQuestions(transcription.text, 5, 'medium', ['multiple_choice', 'short_answer']), 3, 1000);
-      } catch (err) {
-        console.error(`Question generation failed for ${file.originalname}:`, err);
-        await Video.findByIdAndUpdate(newVideo._id, { status: 'failed', processingStage: 'question_generation_failed' });
-        return res.status(500).json({
-          success: false,
-          message: `Question generation failed for ${file.originalname}: ${err.message}`,
-        });
-      }
-
-      await Video.findByIdAndUpdate(newVideo._id, {
-        questions,
-        status: 'completed',
-        processingStage: 'completed',
-      });
 
       uploadResults.push({
         id: newVideo._id,
@@ -441,8 +461,8 @@ router.post('/videos', authenticateToken, checkVideoLimit, videoUpload.array('vi
         filename: file.filename,
         mimetype: file.mimetype,
         size: file.size,
-        cloudinaryUrl: cloudinaryResult.secure_url,
-        publicId: cloudinaryResult.public_id,
+        path: filePath,
+        thumbnail: thumbnailUrl,
         hash: fileHash,
         uploadDate: newVideo.createdAt,
         type: 'video',
@@ -450,10 +470,10 @@ router.post('/videos', authenticateToken, checkVideoLimit, videoUpload.array('vi
           extension: path.extname(file.originalname),
           sizeFormatted: formatFileSize(file.size),
           duration: newVideo.duration,
-          resolution: newVideo.metadata.resolution,
+          resolution: newVideo.metadata.resolution || 'unknown',
         },
-        summary: summaryResult.content,
-        questions,
+        transcript: transcription.text,
+        summary: summary ? summary.content : 'Summary generation failed due to API error.',
       });
     }
 
@@ -464,11 +484,6 @@ router.post('/videos', authenticateToken, checkVideoLimit, videoUpload.array('vi
     });
   } catch (error) {
     console.error('Upload error:', error);
-    if (req.files) {
-      req.files.forEach(file => {
-        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
-      });
-    }
     res.status(500).json({ success: false, message: 'Error uploading videos', error: error.message });
   }
 });
